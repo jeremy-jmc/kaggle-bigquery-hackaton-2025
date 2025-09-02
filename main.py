@@ -1,7 +1,7 @@
 
 import ast
 from tqdm import tqdm
-import os
+import os, json
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 import matplotlib.pyplot as plt
 from IPython.display import display
@@ -157,7 +157,7 @@ print(f"Test NDCG@{K}: {test_ndcg:.4f}")
 # -----------------------------------------------------------------------------
 # Sampling dataset -> ! Working only with `core_val_rating`
 # -----------------------------------------------------------------------------
-sample_users = random.sample(core_train_rating['user_id'].unique().tolist(), 1000)
+sample_users = core_train_rating['user_id'].unique().tolist()   # random.sample(core_train_rating['user_id'].unique().tolist(), 1000)
 
 train_users = core_train_rating[core_train_rating['user_id'].isin(sample_users)]
 val_users = core_val_rating[core_val_rating['user_id'].isin(sample_users)]
@@ -242,10 +242,12 @@ def get_product_features(df):
     
 train_X_p = get_product_features(train_recipes)
 train_X_u = get_user_features(train_users)
+train_X_dates = train_users[['user_id', 'dateLastModified']].sort_values(by=['dateLastModified'], ascending=False).drop_duplicates(subset=['user_id'], keep='first').reset_index(drop=True)
 train_y = train_users[['user_id', 'recipe_id', 'rating']]
 
 test_X_p = get_product_features(test_recipes)
 test_X_u = get_user_features(test_users)
+test_X_dates = test_users[['user_id', 'dateLastModified']].sort_values(by=['dateLastModified'], ascending=False).drop_duplicates(subset=['user_id'], keep='first').reset_index(drop=True)
 test_y = test_users[['user_id', 'recipe_id', 'rating']]
 
 print(f"{set(test_recipes['recipe_id'].values).issubset(train_recipes['recipe_id'].values)=}")
@@ -341,7 +343,7 @@ def mean_hit_rate(model, X, y, query_groups, k=5):
         results.append(hit_rate_at_k(y_true_q, y_pred_q, k))
         start = end
     
-    return np.mean(results)
+    return np.mean(results), results
 
 
 model = XGBRanker(
@@ -363,18 +365,48 @@ model.fit(
 )
 
 # HitRate@5 en train
-train_hit_rate = mean_hit_rate(model, X_train, y_train, query_list_train, k=5)
+train_hit_rate, train_hr_results = mean_hit_rate(model, X_train, y_train, query_list_train, k=5)
 # HitRate@5 en test
-test_hit_rate = mean_hit_rate(model, X_test, y_test, query_list_test, k=5)
+test_hit_rate, test_hr_results = mean_hit_rate(model, X_test, y_test, query_list_test, k=5)
 print(f"HitRate@5 Train: {train_hit_rate:.4f}")
 print(f"HitRate@5 Test:  {test_hit_rate:.4f}")
 
+# Plot distribution of HitRate@5 por usuario
+plt.hist(test_hr_results, bins=20, edgecolor='k', alpha=0.7)
+plt.title('Distribución de HitRate@5 por usuario (Test)')
+plt.xlabel('HitRate@5')
+plt.ylabel('Número de usuarios')
+plt.grid(axis='y', alpha=0.75)
+plt.show()
+
+# Value counts of test_hr_results
+hr_counts = pd.Series(test_hr_results).value_counts().sort_index()
+print("HitRate@5 Value Counts (Test):")
+print(hr_counts)
+
+results_table = pd.DataFrame({
+    'user_id': X_test.reset_index()['user_id'].drop_duplicates(keep='first').values,
+    'test_hit_rate_at_5': test_hr_results,
+    'train_hit_rate_at_5': train_hr_results
+}).assign(
+    diff = lambda df: df['test_hit_rate_at_5'] - df['train_hit_rate_at_5'],
+    abs_diff = lambda df: np.abs(df['diff'])
+)
+
+plt.hist(results_table['diff'], bins=20, edgecolor='k', alpha=0.7)
+
+# En estos casos la LLM buscara justificar las predicciones basado en los perfiles
+results_table.loc[lambda df: (df['train_hit_rate_at_5'] == 1) & (df['test_hit_rate_at_5'] == 1)]
+
+# En estos casos la LLM buscara explicar porque son malas las predicciones
+results_table.loc[lambda df: (df['test_hit_rate_at_5'] == 0) & (df['train_hit_rate_at_5'] == 0)]
 
 
 user_id_sample = '1011486'
-pred = model.predict(X_train.loc[user_id_sample])
+Xu = X_train.loc[user_id_sample]
+pred_u = model.predict(Xu)
 y_true = y_train.loc[user_id_sample].values
-y_pred = pred
+y_pred = pred_u
 
 # Calculate NDCG@5 and NDCG@10
 ndcg_5 = ndcg_score([y_true], [y_pred], k=5)
@@ -400,26 +432,55 @@ print(f"Predictions: {y_pred}")
 
 df_compare = pd.DataFrame({
     "true_rating": y_train.loc[user_id_sample].values,
-    "pred_score": pred
+    "pred_score": pred_u
 }, index=y_train.loc[user_id_sample].index).assign(
     spred_rank = lambda df: df['pred_score'].rank(ascending=False, method='min').astype(int)
 ).sort_values(by='pred_score', ascending=False)
 display(df_compare)
 
 
-
-
-
-
 # -----------------------------------------------------------------------------
-# Item Features (Recipes Ingredients + Directions)
+# Recipes Profile
 # -----------------------------------------------------------------------------
+
+from pydantic import BaseModel, Field
+from typing import List, Dict, Optional
+from langchain.chat_models import init_chat_model
+
+llm = init_chat_model(
+    "us.amazon.nova-micro-v1:0",
+    # "us.anthropic.claude-sonnet-4-20250514-v1:0",
+    model_provider="bedrock_converse",
+    temperature=0.0,
+)
+
+class RecipeProfile(BaseModel):
+    food_type: str = Field(description="Type of food, e.g., dessert, main course, appetizer")
+    cuisine_type: str = Field(description="Cuisine type, e.g., Italian, Chinese, Mexican")
+    dietary_preferences: List[str] = Field(description="Dietary preferences, e.g., vegetarian, vegan, gluten-free")
+    flavor_profile: List[str] = Field(description="Flavor profile, e.g., spicy, sweet, savory")
+    serving_daypart: List[str] = Field(description="Suitable dayparts, e.g., breakfast, lunch, dinner")
+    notes: str = Field(description="Short rationale for the profile")
+
+
+class UserProfile(BaseModel):
+    liked_cuisines: List[str] = Field(description="List of cuisines the user enjoys most, ranked by preference based on their interaction history and ratings")
+    cuisine_preference: str = Field(description="Primary cuisine type the user gravitates towards (e.g., 'Mediterranean', 'Asian Fusion', 'Traditional American')")
+    dietary_preference: str = Field(description="Main dietary restriction or lifestyle the user follows (e.g., 'Vegetarian', 'Low-carb', 'No restrictions')")
+
+    food_preferences: List[str] = Field(default_factory=list, description="Preferred food categories and meal types (e.g., 'comfort food', 'healthy salads', 'baked goods', 'grilled meats')")
+    cuisine_preferences: List[str] = Field(default_factory=list, description="Specific regional or ethnic cuisines the user frequently rates highly (e.g., 'Thai', 'Southern BBQ', 'French pastry')")
+    dietary_preferences: List[str] = Field(default_factory=list, description="Dietary restrictions, health considerations, or eating patterns (e.g., 'gluten-free', 'plant-based', 'high-protein', 'dairy-free')")
+    flavor_preferences: List[str] = Field(default_factory=list, description="Dominant taste profiles and flavor characteristics the user seeks (e.g., 'bold and spicy', 'mild and creamy', 'tangy and citrusy')")
+    daypart_preferences: List[str] = Field(default_factory=list, description="Preferred times of day for different meal types based on rating patterns (e.g., 'hearty breakfast', 'light lunch', 'elaborate dinner')")
+    lifestyle_tags: List[str] = Field(default_factory=list, description="Behavioral patterns and cooking style indicators inferred from recipe choices (e.g., 'quick meals', 'entertainer', 'health-conscious', 'experimental cook')")
+    notes: str = Field(default=None, description="Brief summary explaining the user's overall food personality and any notable patterns in their preferences")
 
 
 def prep_ingredients(text):
     if pd.isna(text): return ""
     # Ingredients are caret-separated in your data
-    return " ".join(str(text).lower().split('^'))
+    return "\n".join([f"- {v}" for v in str(text).split('^')])
 
 
 def prep_directions(text):
@@ -432,13 +493,130 @@ def prep_directions(text):
             d = ast.literal_eval(s)
             # common keys: 'directions' (string) or list
             v = d.get('directions', "")
-            if isinstance(v, list):
-                return " ".join([str(t) for t in v]).lower()
-            return str(v).lower()
+            v = str(v).split('\n')
+            v = [x.strip() for x in v if len(x.strip()) > 0]
+            v = [f". {x}" if x and x[0].isupper() else x for x in v]
+
+            return " ".join(v).strip(".").replace(" . ", ". ").replace("..", ".").strip()
         except Exception:
             return s.lower()
     return s.lower()
 
+all_recipes['parsed_ingredients'] = all_recipes['ingredients'].apply(prep_ingredients)
+all_recipes['parsed_recipe'] = all_recipes['cooking_directions'].apply(prep_directions)
+
+
+
+a_recipe = all_recipes.iloc[3]
+
+review_recipe_messages = [
+    {
+        "role": "system",
+        "content": (
+            "You are a culinary expert specializing in recipe analysis and categorization. "
+            "Your task is to analyze the provided recipe details and generate a structured profile "
+            "that includes the type of food, cuisine, dietary preferences, and flavor profile. "
+            "Ensure the profile is concise and accurately reflects the characteristics of the recipe."
+        )
+    },
+    {
+        "role": "user",
+        "content": (
+            f"Here are the details of a recipe:\n\n"
+            f"Title: {a_recipe['recipe_name']}\n\n"
+            f"Ingredients:\n{a_recipe['parsed_ingredients']}\n\n"
+            f"Cooking Directions:\n{a_recipe['parsed_recipe']}\n\n"
+            "Based on the above information, please provide a structured profile of the recipe."
+        )
+    }
+]
+
+response = llm.with_structured_output(RecipeProfile, include_raw=True).invoke(review_recipe_messages)
+print(json.dumps(response['parsed'].model_dump(), indent=2))
+
+print(review_recipe_messages[1]['content'])
+
+reviews = []
+for idx, row in tqdm(all_recipes.iterrows(), total=len(all_recipes)):
+    recipe_id = row['recipe_id']
+    interactions_dict = ast.literal_eval(row['reviews'])
+    for k, v in interactions_dict.items():
+        reviews.append({
+            'recipe_id': recipe_id,
+            'user_id': str(k),
+            **v
+        })
+
+reviews_df = pd.DataFrame(reviews).loc[
+    lambda df: df['user_id'].isin(sample_users)
+]
+display(reviews_df)
+
+user_id_sample = '2043209'
+display(reviews_df.loc[lambda df: df['user_id'] == user_id_sample].sort_values(by='dateLastModified', ascending=False))
+
+merged_df = reviews_df.merge(
+    train_X_dates,
+    on="user_id",
+    suffixes=("_review", "_limit")
+)
+
+
+filtered_df = merged_df[
+    merged_df["dateLastModified_review"] <= merged_df["dateLastModified_limit"]
+].rename(columns={"dateLastModified_review": "dateLastModified"})
+
+filtered_reviews = (
+    filtered_df[reviews_df.columns]
+    .sort_values(by=['user_id', 'dateLastModified'], ascending=False)
+    .reset_index(drop=True)
+    .merge(
+        all_recipes[['recipe_id', 'recipe_name', 'aver_rate', 'parsed_ingredients', 'parsed_recipe']],
+    )
+)
+
+print(filtered_reviews['user_id'].value_counts())
+
+def get_prompt_user_profile(user_history: pd.DataFrame):
+    user_info = f"The user has rated {len(user_history)} recipes, with an average rating of {user_history['rating'].mean():.2f}.\n"
+
+    user_history = user_history.sort_values(by='dateLastModified', ascending=False).reset_index(drop=True).iloc[:10]
+
+    for idx, row in user_history.iterrows():
+        user_info += (
+            f"\nRecipe Title: {row['recipe_name']}\n"
+            f"User Rating: {row['rating']}\n"
+            f"User Comment: {row['text']}\n"
+            f"Recipe Average Rating: {row['aver_rate']}\n"
+            f"Ingredients:\n{row['parsed_ingredients']}\n"
+            f"Cooking Directions:\n{row['parsed_recipe']}\n"
+            "----\n"
+        )
+
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a user profile expert specializing in analyzing user preferences based on their recipe interactions. "
+                "Your task is to generate a structured user profile that captures their culinary tastes, dietary preferences, flavor inclinations, among others. "
+                "Ensure the profile is concise and accurately reflects the user's food personality based on their interaction history."
+            )
+        },
+        {
+            "role": "user",
+            "content": user_info + "\nBased on the above information, please provide a structured profile of the user."
+        }
+    ]
+
+u_h = filtered_reviews.loc[lambda df: df['user_id'] == user_id_sample]
+
+u_h_messages = get_prompt_user_profile(u_h)
+response = llm.with_structured_output(UserProfile, include_raw=True).invoke(u_h_messages)
+print(json.dumps(response['parsed'].model_dump(), indent=2))
+
+# -----------------------------------------------------------------------------
+# Item Features LightFM
+# -----------------------------------------------------------------------------
 
 train_recipes['ingr_txt'] = train_recipes['ingredients'].apply(prep_ingredients)
 train_recipes['dir_txt']  = train_recipes['cooking_directions'].apply(prep_directions)

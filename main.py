@@ -158,20 +158,42 @@ print(f"Test NDCG@{K}: {test_ndcg:.4f}")
 # -----------------------------------------------------------------------------
 # Sampling dataset -> ! Working only with `core_val_rating`
 # -----------------------------------------------------------------------------
-sample_users = core_train_rating['user_id'].unique().tolist()   # random.sample(core_train_rating['user_id'].unique().tolist(), 1000)
+# intersection of users in train, val, test
+experiment_users = set(core_train_rating['user_id']).intersection(set(core_val_rating['user_id'])).intersection(set(core_test_rating['user_id']))   # core_train_rating['user_id'].unique().tolist()   # random.sample(core_train_rating['user_id'].unique().tolist(), 1000)
+# intersection between train, val, test recipe_id's
+experiment_recipes = (
+    set(core_train_rating.loc[lambda df: df['user_id'].isin(experiment_users)]['recipe_id'])
+    .intersection(set(core_val_rating.loc[lambda df: df['user_id'].isin(experiment_users)]['recipe_id']))
+    .intersection(set(core_test_rating.loc[lambda df: df['user_id'].isin(experiment_users)]['recipe_id']))
+)
 
-train_users = core_train_rating[core_train_rating['user_id'].isin(sample_users)]
-val_users = core_val_rating[core_val_rating['user_id'].isin(sample_users)]
-test_users = core_test_rating[core_test_rating['user_id'].isin(sample_users)]
+train_users = core_train_rating[
+    core_train_rating['user_id'].isin(experiment_users) & core_train_rating['recipe_id'].isin(experiment_recipes)
+]
+val_users = core_val_rating[
+    core_val_rating['user_id'].isin(experiment_users) & core_val_rating['recipe_id'].isin(experiment_recipes)
+]
+test_users = core_test_rating[
+    core_test_rating['user_id'].isin(experiment_users) & core_test_rating['recipe_id'].isin(experiment_recipes)
+]
 
+print(f"After filtering by common recipes and users: {len(train_users)=}, {len(val_users)=}, {len(test_users)=}")
+experiment_users = set(train_users['user_id']).intersection(set(val_users['user_id'])).intersection(set(test_users['user_id']))
+experiment_recipes = set(train_users['recipe_id']).intersection(set(val_users['recipe_id'])).intersection(set(test_users['recipe_id']))
 
-train_recipes = recipes[recipes['recipe_id'].isin(train_users['recipe_id'].unique())]
-test_recipes = recipes[recipes['recipe_id'].isin(test_users['recipe_id'].unique())]
+train_users = train_users[train_users['user_id'].isin(experiment_users)]
+val_users = val_users[val_users['user_id'].isin(experiment_users)]
+test_users = test_users[test_users['user_id'].isin(experiment_users)]
 
-print("Sampled users:", len(sample_users))
+train_recipes = recipes[recipes['recipe_id'].isin(experiment_recipes)]
+test_recipes = recipes[recipes['recipe_id'].isin(experiment_recipes)]
+
+print("Sampled users:", len(experiment_users))
 # Calculate if all `sample_users` are present in val and test splits
 print("Users in val:", len(val_users['user_id'].unique()))
 print("Users in test:", len(test_users['user_id'].unique()))
+assert len(experiment_users) == len(val_users['user_id'].unique()) == len(test_users['user_id'].unique()) == len(train_users['user_id'].unique()), \
+    "Not all experiment users are present in all splits!"
 
 display(train_users['recipe_id'].value_counts().sort_values(ascending=False))
 
@@ -255,9 +277,14 @@ print(f"{set(test_recipes['recipe_id'].values).issubset(train_recipes['recipe_id
 
 def get_model_input(X_u, X_m, y):
     merged = pd.merge(X_u, y, on=['user_id'], how='inner')
-    merged = pd.merge(X_m, merged, on=['recipe_id'], how='outer')     # Maintain all records from left dataset even items without ratings
+    merged = pd.merge(X_m, merged, on=['recipe_id'], how='inner')     # Maintain all records from left dataset even items without ratings
     
     merged.fillna(0, inplace=True)
+    merged['user_id'] = merged['user_id'].astype(int)
+    merged['recipe_id'] = merged['recipe_id'].astype(int)
+    merged = merged.sort_values(by=['user_id', 'recipe_id']).reset_index(drop=True)
+    merged['user_id'] = merged['user_id'].astype(str)
+    merged['recipe_id'] = merged['recipe_id'].astype(str)
     features_cols = list(merged.drop(columns=['user_id', 'recipe_id', 'rating']).columns)
 
     query_list = merged['user_id'].value_counts()
@@ -274,6 +301,7 @@ def get_model_input(X_u, X_m, y):
 X_train, y_train, query_list_train = get_model_input(train_X_u, train_X_p, train_y)
 X_test, y_test, query_list_test = get_model_input(test_X_u, test_X_p, test_y)
 
+assert len(query_list_train) == len(query_list_test), "Different number of users in train and test!"
 
 from xgboost import XGBRanker
 from sklearn.metrics import ndcg_score
@@ -578,7 +606,7 @@ for idx, row in tqdm(all_recipes.iterrows(), total=len(all_recipes)):
         })
 
 reviews_df = pd.DataFrame(reviews).loc[
-    lambda df: df['user_id'].isin(sample_users)
+    lambda df: df['user_id'].isin(experiment_users)
 ]
 display(reviews_df)
 
@@ -656,8 +684,11 @@ target_users = results_table.loc[lambda df: (df['test_hit_rate_at_5'] == 0) & (d
 tqdm.pandas()
 
 for idx, row in target_users.iterrows():
-    user_history = filtered_reviews.loc[lambda df: df['user_id'] == row['user_id']].head(25)
+    user_history = filtered_reviews.loc[lambda df: df['user_id'] == row['user_id']].head(5)
     user_history['recipe_profile'] = user_history.progress_apply(get_recipe_profile, axis=1)
+    # TODO: get predictions and its recipe profiles to compare with the user history
+    sub = X_test.loc[row['user_id']]
+    # TODO: call LLM
     break
 
 
@@ -721,15 +752,15 @@ class UserProfile(BaseModel):
     liked_cuisines: List[str] = Field(description="Given the history of user interactions, list the cuisines the user likes more in order.")
 """
 
-n_users = len(sample_users)
-user2idx = {u: i for i, u in enumerate(sample_users)}
+n_users = len(experiment_users)
+user2idx = {u: i for i, u in enumerate(experiment_users)}
 idx2user = {i: u for u, i in user2idx.items()}
 
 u_stats = (
-    core_train_rating[core_train_rating['user_id'].isin(sample_users)]
+    core_train_rating[core_train_rating['user_id'].isin(experiment_users)]
     .groupby('user_id')
     .agg(count=('rating', 'size'), mean=('rating', 'mean'))
-    .reindex(sample_users)
+    .reindex(experiment_users)
     .fillna({'count': 0, 'mean': 0.0})
 )
 
@@ -762,8 +793,8 @@ def make_ui_matrix(df, user2idx, recipe2idx, n_users, n_items, threshold=4):
     data = (df['rating'].astype(float).values >= threshold).astype(np.float32)
     return sparse.coo_matrix((data, (rows, cols)), shape=(n_users, n_items)).tocsr()
 
-train_ui = make_ui_matrix(core_train_rating.loc[lambda df: df['user_id'].isin(sample_users)], user2idx, recipe2idx, n_users, n_items, threshold=4)
-test_ui  = make_ui_matrix(core_test_rating.loc[lambda df: df['user_id'].isin(sample_users)],  user2idx, recipe2idx, n_users, n_items, threshold=4)
+train_ui = make_ui_matrix(core_train_rating.loc[lambda df: df['user_id'].isin(experiment_users)], user2idx, recipe2idx, n_users, n_items, threshold=4)
+test_ui  = make_ui_matrix(core_test_rating.loc[lambda df: df['user_id'].isin(experiment_users)],  user2idx, recipe2idx, n_users, n_items, threshold=4)
 
 
 # Align item features to LightFM expectations: add identity and align order to items_univ

@@ -1,5 +1,6 @@
 
 import ast
+import seaborn as sns
 from tqdm import tqdm
 import os, json
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -234,7 +235,7 @@ def get_user_features(df):
 
 def get_product_features(df):
     df = df[['recipe_id', 'aver_rate', 'review_nums']].merge(
-        nutrition_df,
+        nutrition_df[['recipe_id', 'sugars', 'sodium', 'carbohydrates', 'calories', 'fat', 'caloriesFromFat', 'calcium', 'fiber', 'cholesterol', 'protein', 'vitaminA', 'potassium', 'saturatedFat']],
         on='recipe_id',
         how='left'
     )
@@ -371,6 +372,14 @@ test_hit_rate, test_hr_results = mean_hit_rate(model, X_test, y_test, query_list
 print(f"HitRate@5 Train: {train_hit_rate:.4f}")
 print(f"HitRate@5 Test:  {test_hit_rate:.4f}")
 
+
+plt.figure(figsize=(12, 6))
+df_plt = pd.DataFrame({'feature_name': X_train.columns, 'feature_importance': model.feature_importances_})
+df_plt.sort_values('feature_importance', ascending=False, inplace=True)
+sns.barplot(x="feature_importance", y="feature_name", data=df_plt,color='#FF6631')
+plt.title('feature importance')
+plt.show()
+
 # Plot distribution of HitRate@5 por usuario
 plt.hist(test_hr_results, bins=20, edgecolor='k', alpha=0.7)
 plt.title('Distribución de HitRate@5 por usuario (Test)')
@@ -394,6 +403,7 @@ results_table = pd.DataFrame({
 )
 
 plt.hist(results_table['diff'], bins=20, edgecolor='k', alpha=0.7)
+plt.title('Diferencia HitRate@5 (Test - Train) por usuario')
 
 # En estos casos la LLM buscara justificar las predicciones basado en los perfiles
 results_table.loc[lambda df: (df['train_hit_rate_at_5'] == 1) & (df['test_hit_rate_at_5'] == 1)]
@@ -401,6 +411,9 @@ results_table.loc[lambda df: (df['train_hit_rate_at_5'] == 1) & (df['test_hit_ra
 # En estos casos la LLM buscara explicar porque son malas las predicciones
 results_table.loc[lambda df: (df['test_hit_rate_at_5'] == 0) & (df['train_hit_rate_at_5'] == 0)]
 
+# -----------------------------------------------------------------------------
+# Evaluate single user
+# -----------------------------------------------------------------------------
 
 user_id_sample = '1011486'
 Xu = X_train.loc[user_id_sample]
@@ -506,35 +519,52 @@ all_recipes['parsed_ingredients'] = all_recipes['ingredients'].apply(prep_ingred
 all_recipes['parsed_recipe'] = all_recipes['cooking_directions'].apply(prep_directions)
 
 
+def get_prompt_recipe_profile(recipe: pd.Series):
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a culinary expert specializing in recipe analysis and categorization. "
+                "Your task is to analyze the provided recipe details and generate a structured profile "
+                "that includes the type of food, cuisine, dietary preferences, and flavor profile. "
+                "Ensure the profile is concise and accurately reflects the characteristics of the recipe."
+            )
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Here are the details of a recipe:\n\n"
+                f"Title: {recipe['recipe_name']}\n\n"
+                f"Ingredients:\n{recipe['parsed_ingredients']}\n\n"
+                f"Cooking Directions:\n{recipe['parsed_recipe']}\n\n"
+                "Based on the above information, please provide a structured profile of the recipe."
+            )
+        }
+    ]
+
+import tenacity
+from tenacity import retry, wait_fixed, stop_after_attempt
+
+@tenacity.retry(wait=wait_fixed(3), stop=stop_after_attempt(5), reraise=True)
+def get_recipe_profile(recipe: pd.Series):
+    review_recipe_messages = get_prompt_recipe_profile(recipe)
+    # print(review_recipe_messages[1]['content'])
+
+    response = llm.with_structured_output(RecipeProfile, include_raw=True).invoke(review_recipe_messages, temperature=0.2)
+    print(response)
+
+    return response['parsed'].model_dump()
+
 
 a_recipe = all_recipes.iloc[3]
+r_parsed = get_recipe_profile(a_recipe)
 
-review_recipe_messages = [
-    {
-        "role": "system",
-        "content": (
-            "You are a culinary expert specializing in recipe analysis and categorization. "
-            "Your task is to analyze the provided recipe details and generate a structured profile "
-            "that includes the type of food, cuisine, dietary preferences, and flavor profile. "
-            "Ensure the profile is concise and accurately reflects the characteristics of the recipe."
-        )
-    },
-    {
-        "role": "user",
-        "content": (
-            f"Here are the details of a recipe:\n\n"
-            f"Title: {a_recipe['recipe_name']}\n\n"
-            f"Ingredients:\n{a_recipe['parsed_ingredients']}\n\n"
-            f"Cooking Directions:\n{a_recipe['parsed_recipe']}\n\n"
-            "Based on the above information, please provide a structured profile of the recipe."
-        )
-    }
-]
+print(json.dumps(r_parsed, indent=2))
 
-response = llm.with_structured_output(RecipeProfile, include_raw=True).invoke(review_recipe_messages)
-print(json.dumps(response['parsed'].model_dump(), indent=2))
 
-print(review_recipe_messages[1]['content'])
+# -----------------------------------------------------------------------------
+# User interactions with text reviews
+# -----------------------------------------------------------------------------
 
 reviews = []
 for idx, row in tqdm(all_recipes.iterrows(), total=len(all_recipes)):
@@ -563,7 +593,7 @@ merged_df = reviews_df.merge(
 
 
 filtered_df = merged_df[
-    merged_df["dateLastModified_review"] <= merged_df["dateLastModified_limit"]
+    merged_df["dateLastModified_review"] < merged_df["dateLastModified_limit"]
 ].rename(columns={"dateLastModified_review": "dateLastModified"})
 
 filtered_reviews = (
@@ -613,6 +643,24 @@ u_h = filtered_reviews.loc[lambda df: df['user_id'] == user_id_sample]
 u_h_messages = get_prompt_user_profile(u_h)
 response = llm.with_structured_output(UserProfile, include_raw=True).invoke(u_h_messages)
 print(json.dumps(response['parsed'].model_dump(), indent=2))
+
+# -----------------------------------------------------------------------------
+# Unveiling Features using LLMs
+# -----------------------------------------------------------------------------
+
+def get_hidden_patterns(row: pd.Series):
+    pass
+
+
+target_users = results_table.loc[lambda df: (df['test_hit_rate_at_5'] == 0) & (df['train_hit_rate_at_5'] == 0)]
+tqdm.pandas()
+
+for idx, row in target_users.iterrows():
+    user_history = filtered_reviews.loc[lambda df: df['user_id'] == row['user_id']].head(25)
+    user_history['recipe_profile'] = user_history.progress_apply(get_recipe_profile, axis=1)
+    break
+
+
 
 # -----------------------------------------------------------------------------
 # Item Features LightFM

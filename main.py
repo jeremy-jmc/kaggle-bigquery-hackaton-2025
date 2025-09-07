@@ -11,7 +11,12 @@ import random
 from scipy import sparse
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import StandardScaler
+from dotenv import load_dotenv
 
+np.set_printoptions(suppress=True, precision=2)
+pd.set_option("display.float_format", "{:.3f}".format)
+
+load_dotenv()
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
@@ -30,6 +35,21 @@ display('interactions', interactions.head(5))
 core_recipes = pd.read_csv('./data/food_recsys/core-data_recipe.csv')
 
 
+def modify_rating(core: pd.DataFrame):
+    # --- Favoritism by antiquity: the older the date, the higher the bonus ---
+    alpha = 0.2  # maximum bonus that can be added to the rating (adjust as needed)
+    min_d = core['dateLastModified'].min()
+    max_d = core['dateLastModified'].max()
+    denom = (max_d - min_d).total_seconds() or 1  # avoid division by zero
+
+    # Normalized antiquity: min_d -> 1 (oldest), max_d -> 0 (most recent)
+    age_norm = 1.0 - (core['dateLastModified'] - min_d).dt.total_seconds() / denom
+
+    # New rating with bonus; keep in [1, 5] range
+    core['rating_date'] = (core['rating'].astype(float) + alpha * age_norm)
+
+    return core.sort_values(by=['user_id', 'rating_date'], ascending=[True, False])
+
 def clean_df(core: pd.DataFrame) -> pd.DataFrame:
     core['user_id'] = core['user_id'].astype(str)
     core['recipe_id'] = core['recipe_id'].astype(str)
@@ -37,6 +57,7 @@ def clean_df(core: pd.DataFrame) -> pd.DataFrame:
     core['dateLastModified'] = pd.to_datetime(core['dateLastModified'], format='ISO8601')
     core['month'] = core['dateLastModified'].dt.month
     core['quarter'] = core['dateLastModified'].dt.quarter
+    core['rating'] = core['rating'].astype(float)
     
     core = core.dropna(how='any')
     return core
@@ -158,6 +179,12 @@ print(f"Test NDCG@{K}: {test_ndcg:.4f}")
 # -----------------------------------------------------------------------------
 # Sampling dataset -> ! Working only with `core_val_rating`
 # -----------------------------------------------------------------------------
+# Use training data of last 12 months
+min_date_val = core_train_rating['dateLastModified'].max() - pd.Timedelta(weeks=48)
+core_train_rating = core_train_rating.loc[
+    lambda df: df['dateLastModified'] >= min_date_val
+]
+
 # intersection of users in train, val, test
 experiment_users = set(core_train_rating['user_id']).intersection(set(core_val_rating['user_id'])).intersection(set(core_test_rating['user_id']))   # core_train_rating['user_id'].unique().tolist()   # random.sample(core_train_rating['user_id'].unique().tolist(), 1000)
 # intersection between train, val, test recipe_id's
@@ -185,15 +212,32 @@ train_users = train_users[train_users['user_id'].isin(experiment_users)]
 val_users = val_users[val_users['user_id'].isin(experiment_users)]
 test_users = test_users[test_users['user_id'].isin(experiment_users)]
 
-train_recipes = recipes[recipes['recipe_id'].isin(experiment_recipes)]
-test_recipes = recipes[recipes['recipe_id'].isin(experiment_recipes)]
+# Reduce predictions to next month only
+max_date_val = val_users['dateLastModified'].min() + pd.Timedelta(days=30)
+val_users = val_users.loc[
+    lambda df: df['dateLastModified'] <= max_date_val
+]
+val_users = val_users[
+    val_users['user_id'].isin(
+        val_users['user_id'].value_counts().loc[lambda x: x >= 5].index
+    )
+]
+train_users = train_users[train_users['user_id'].isin(val_users['user_id'])]
+test_users = test_users[test_users['user_id'].isin(val_users['user_id'])]
+
+train_users = modify_rating(train_users)
+test_users = modify_rating(test_users)
+val_users = modify_rating(val_users)
+
+train_recipes = val_recipes = test_recipes = \
+    recipes[recipes['recipe_id'].isin(experiment_recipes)]
 
 print("Sampled users:", len(experiment_users))
 # Calculate if all `sample_users` are present in val and test splits
 print("Users in val:", len(val_users['user_id'].unique()))
 print("Users in test:", len(test_users['user_id'].unique()))
-assert len(experiment_users) == len(val_users['user_id'].unique()) == len(test_users['user_id'].unique()) == len(train_users['user_id'].unique()), \
-    "Not all experiment users are present in all splits!"
+assert len(test_users['user_id'].unique()) ==  len(val_users['user_id'].unique()) == len(train_users['user_id'].unique()), \
+    "Not all experiment users are present in all splits!"   # len(experiment_users) == 
 
 display(train_users['recipe_id'].value_counts().sort_values(ascending=False))
 
@@ -202,7 +246,7 @@ display(train_users['recipe_id'].value_counts().sort_values(ascending=False))
 # Item Features (Recipes Nutrition)
 # -----------------------------------------------------------------------------
 
-all_recipes = pd.concat([train_recipes, test_recipes]).drop_duplicates(subset=['recipe_id'])
+all_recipes = pd.concat([train_recipes, val_recipes, test_recipes]).drop_duplicates(subset=['recipe_id'])
 nutrition_values = []
 for idx, row in tqdm(all_recipes.iterrows(), total=len(all_recipes)):
     nutritions_dict = ast.literal_eval(row['nutritions'])
@@ -262,16 +306,22 @@ def get_product_features(df):
         how='left'
     )
     return df
-    
+
+# TODO: add some weight value to the most proximate dates
 train_X_p = get_product_features(train_recipes)
 train_X_u = get_user_features(train_users)
 train_X_dates = train_users[['user_id', 'dateLastModified']].sort_values(by=['dateLastModified'], ascending=False).drop_duplicates(subset=['user_id'], keep='first').reset_index(drop=True)
-train_y = train_users[['user_id', 'recipe_id', 'rating']]
+train_y = train_users[['user_id', 'recipe_id', 'rating', 'rating_date']]
 
 test_X_p = get_product_features(test_recipes)
 test_X_u = get_user_features(test_users)
 test_X_dates = test_users[['user_id', 'dateLastModified']].sort_values(by=['dateLastModified'], ascending=False).drop_duplicates(subset=['user_id'], keep='first').reset_index(drop=True)
-test_y = test_users[['user_id', 'recipe_id', 'rating']]
+test_y = test_users[['user_id', 'recipe_id', 'rating', 'rating_date']]
+
+val_X_p = get_product_features(val_recipes)
+val_X_u = get_user_features(val_users)
+val_X_dates = val_users[['user_id', 'dateLastModified']].sort_values(by=['dateLastModified'], ascending=False).drop_duplicates(subset=['user_id'], keep='first').reset_index(drop=True)
+val_y = val_users[['user_id', 'recipe_id', 'rating', 'rating_date']]
 
 print(f"{set(test_recipes['recipe_id'].values).issubset(train_recipes['recipe_id'].values)=}")
 
@@ -285,7 +335,7 @@ def get_model_input(X_u, X_m, y):
     merged = merged.sort_values(by=['user_id', 'recipe_id']).reset_index(drop=True)
     merged['user_id'] = merged['user_id'].astype(str)
     merged['recipe_id'] = merged['recipe_id'].astype(str)
-    features_cols = list(merged.drop(columns=['user_id', 'recipe_id', 'rating']).columns)
+    features_cols = list(merged.drop(columns=['user_id', 'recipe_id', 'rating', 'rating_date']).columns)
 
     query_list = merged['user_id'].value_counts()
     merged = merged.set_index(['user_id', 'recipe_id'])
@@ -295,13 +345,15 @@ def get_model_input(X_u, X_m, y):
 
     df_x = merged[features_cols]
     df_y = merged['rating']
+    df_y_mod = merged['rating_date']
 
-    return df_x, df_y, query_list
+    return df_x, df_y, df_y_mod, query_list
 
-X_train, y_train, query_list_train = get_model_input(train_X_u, train_X_p, train_y)
-X_test, y_test, query_list_test = get_model_input(test_X_u, test_X_p, test_y)
+X_train, y_train, y_train_mod, query_list_train = get_model_input(train_X_u, train_X_p, train_y)
+X_test, y_test, y_test_mod, query_list_test = get_model_input(test_X_u, test_X_p, test_y)
+X_val, y_val, y_val_mod, query_list_val = get_model_input(val_X_u, val_X_p, val_y)
 
-assert len(query_list_train) == len(query_list_test), "Different number of users in train and test!"
+assert len(query_list_train) == len(query_list_test) == len(query_list_val), "Different number of users in train, test and val!"
 
 from xgboost import XGBRanker
 from sklearn.metrics import ndcg_score
@@ -330,10 +382,12 @@ def hit_rate_at_k(y_true, y_pred, k=5):
     
     # Top-K según el modelo
     top_k_pred = set(np.argsort(y_pred)[::-1][:k])
-    
+    # print(f"{top_k_pred=}")
+
     # Top-K real (ground truth)
     top_k_true = set(np.argsort(y_true)[::-1][:k])
-    
+    # print(f"{top_k_true=}")
+
     # Intersección
     hits = len(top_k_pred.intersection(top_k_true))
     
@@ -401,14 +455,15 @@ model.fit(
     verbose=10
 )
 
+K_m = 5
 # HitRate@5 en train
 train_hit_rate, train_hr_results, train_true_results, train_pred_results = \
-    mean_hit_rate(model, X_train, y_train, query_list_train, k=5)
+    mean_hit_rate(model, X_train, y_train_mod, query_list_train, k=K_m)
 # HitRate@5 en test
-test_hit_rate, test_hr_results, test_true_results, test_pred_results = \
-    mean_hit_rate(model, X_test, y_test, query_list_test, k=5)
+val_hit_rate, val_hr_results, val_true_results, val_pred_results = \
+    mean_hit_rate(model, X_val, y_val_mod, query_list_val, k=K_m)
 print(f"HitRate@5 Train: {train_hit_rate:.4f}")
-print(f"HitRate@5 Test:  {test_hit_rate:.4f}")
+print(f"HitRate@5 Val:  {val_hit_rate:.4f}")
 
 
 plt.figure(figsize=(12, 6))
@@ -419,41 +474,41 @@ plt.title('feature importance')
 plt.show()
 
 # Plot distribution of HitRate@5 por usuario
-plt.hist(test_hr_results, bins=20, edgecolor='k', alpha=0.7)
-plt.title('Distribución de HitRate@5 por usuario (Test)')
-plt.xlabel('HitRate@5')
+plt.hist(val_hr_results, bins=20, edgecolor='k', alpha=0.7)
+plt.title(f'Distribución de HitRate@{K_m} por usuario (Val)')
+plt.xlabel(f'HitRate@{K_m}')
 plt.ylabel('Número de usuarios')
 plt.grid(axis='y', alpha=0.75)
 plt.show()
 
-# Value counts of test_hr_results
-hr_counts = pd.Series(test_hr_results).value_counts().sort_index()
-print("HitRate@5 Value Counts (Test):")
+# Value counts of val_hr_results
+hr_counts = pd.Series(val_hr_results).value_counts().sort_index()
+print(f"HitRate@{K_m} Value Counts (Val):")
 print(hr_counts)
 
 results_table = pd.DataFrame({
-    'user_id': X_test.reset_index()['user_id'].drop_duplicates(keep='first').values,
-    'test_hit_rate_at_5': test_hr_results,
-    'train_hit_rate_at_5': train_hr_results
+    'user_id': X_val.reset_index()['user_id'].drop_duplicates(keep='first').values,
+    f'val_hit_rate_at_{K_m}': val_hr_results,
+    f'train_hit_rate_at_{K_m}': train_hr_results
 }).assign(
-    diff = lambda df: df['test_hit_rate_at_5'] - df['train_hit_rate_at_5'],
+    diff = lambda df: df[f'val_hit_rate_at_{K_m}'] - df[f'train_hit_rate_at_{K_m}'],
     abs_diff = lambda df: np.abs(df['diff'])
 )
 
 plt.hist(results_table['diff'], bins=20, edgecolor='k', alpha=0.7)
-plt.title('Diferencia HitRate@5 (Test - Train) por usuario')
+plt.title('Diferencia HitRate@5 (Val - Train) por usuario')
 
 # En estos casos la LLM buscara justificar las predicciones basado en los perfiles
-results_table.loc[lambda df: (df['train_hit_rate_at_5'] == 1) & (df['test_hit_rate_at_5'] == 1)]
+results_table.loc[lambda df: (df[f'train_hit_rate_at_{K_m}'] == 1) & (df[f'val_hit_rate_at_{K_m}'] == 1)]
 
 # En estos casos la LLM buscara explicar porque son malas las predicciones
-results_table.loc[lambda df: (df['test_hit_rate_at_5'] == 0) & (df['train_hit_rate_at_5'] == 0)]
+results_table.loc[lambda df: (df[f'train_hit_rate_at_{K_m}'] == 0) & (df[f'val_hit_rate_at_{K_m}'] == 0)]
 
 # -----------------------------------------------------------------------------
 # Evaluate single user
 # -----------------------------------------------------------------------------
 
-user_id_sample = '1011486'
+user_id_sample = X_train.reset_index()['user_id'].values[-1]
 Xu = X_train.loc[user_id_sample]
 pred_u = model.predict(Xu)
 y_true = y_train.loc[user_id_sample].values
@@ -499,9 +554,8 @@ from typing import List, Dict, Optional
 from langchain.chat_models import init_chat_model
 
 llm = init_chat_model(
-    "us.amazon.nova-micro-v1:0",
-    # "us.anthropic.claude-sonnet-4-20250514-v1:0",
-    model_provider="bedrock_converse",
+    # "us.amazon.nova-micro-v1:0", model_provider="bedrock_converse",     # "us.anthropic.claude-sonnet-4-20250514-v1:0",
+    "gemini-2.5-flash", model_provider="google_genai",
     temperature=0.0,
 )
 
@@ -690,18 +744,27 @@ def get_hidden_patterns(row: pd.Series):
     pass
 
 
-target_users = results_table.loc[lambda df: (df['test_hit_rate_at_5'] == 0) & (df['train_hit_rate_at_5'] == 0)]
+target_users = results_table.loc[lambda df: (df[f'val_hit_rate_at_{K_m}'] <= 0.2)]    #  & (df[f'train_hit_rate_at_{K_m}'] == 0)
+display(target_users)
 tqdm.pandas()
 
 for idx, row in target_users.iterrows():
     user_history = filtered_reviews.loc[lambda df: df['user_id'] == row['user_id']].head(5)
     user_history['recipe_profile'] = user_history.progress_apply(get_recipe_profile, axis=1)
     # TODO: get predictions and its recipe profiles to compare with the user history
-    sub = X_test.loc[row['user_id']]
-    predictions = train_pred_results[row['user_id']]
-    true_results = train_true_results[row['user_id']]
+    sub = X_val.loc[row['user_id']]
+    predictions = val_pred_results[row['user_id']]
+    true_results = val_true_results[row['user_id']]
+    merged_results = true_results.reset_index().assign(scores = predictions).sort_values(by=['scores', 'rating_date'], ascending=[False, False])
     # TODO: call LLM
     break
+
+print(sub.shape)
+print(predictions.shape)
+print(true_results.shape)
+display(merged_results)
+
+hit_rate_at_k(true_results, predictions)
 
 
 

@@ -643,7 +643,7 @@ def get_recipe_profile(recipe: pd.Series):
     # print(review_recipe_messages[1]['content'])
 
     response = llm.with_structured_output(RecipeProfile, include_raw=True).invoke(review_recipe_messages, temperature=0.2)
-    print(response)
+    # print(response)
 
     return response['parsed'].model_dump()
 
@@ -712,8 +712,10 @@ def get_prompt_user_profile(user_history: pd.DataFrame):
             f"Recipe Average Rating: {row['aver_rate']}\n"
             f"Ingredients:\n{row['parsed_ingredients']}\n"
             f"Cooking Directions:\n{row['parsed_recipe']}\n"
-            "----\n"
         )
+        if 'recipe_profile' in row and isinstance(row['recipe_profile'], dict):
+            user_info += f"Recipe Profile: {json.dumps(row['recipe_profile'])}\n"
+        user_info += "----\n"
 
     return [
         {
@@ -729,6 +731,16 @@ def get_prompt_user_profile(user_history: pd.DataFrame):
             "content": user_info + "\nBased on the above information, please provide a structured profile of the user."
         }
     ]
+
+@tenacity.retry(wait=wait_fixed(3), stop=stop_after_attempt(5), reraise=True)
+def get_user_profile(user_history: pd.DataFrame):
+    review_recipe_messages = get_prompt_user_profile(user_history)
+    # print(review_recipe_messages[1]['content'])
+
+    response = llm.with_structured_output(UserProfile, include_raw=True).invoke(review_recipe_messages, temperature=0.2)
+    # print(response)
+
+    return response['parsed'].model_dump()
 
 u_h = filtered_reviews.loc[lambda df: df['user_id'] == user_id_sample]
 
@@ -749,22 +761,36 @@ display(target_users)
 tqdm.pandas()
 
 for idx, row in target_users.iterrows():
-    user_history = filtered_reviews.loc[lambda df: df['user_id'] == row['user_id']].head(5)
+    id_user = row['user_id']
+    
+    print(f"{id_user=}")
+    user_history = filtered_reviews.loc[lambda df: df['user_id'] == id_user].head(5)
     user_history['recipe_profile'] = user_history.progress_apply(get_recipe_profile, axis=1)
     # TODO: get predictions and its recipe profiles to compare with the user history
-    sub = X_val.loc[row['user_id']]
-    predictions = val_pred_results[row['user_id']]
-    true_results = val_true_results[row['user_id']]
-    merged_results = true_results.reset_index().assign(scores = predictions).sort_values(by=['scores', 'rating_date'], ascending=[False, False])
+    sub = X_val.loc[id_user]
+    predictions = val_pred_results[id_user]
+    true_results = val_true_results[id_user]
+    item_predictions_profile = true_results.reset_index().assign(scores = predictions).sort_values(by=['scores', 'rating_date'], ascending=[False, False]).join(
+        all_recipes.set_index('recipe_id')[['recipe_name', 'parsed_ingredients', 'parsed_recipe']], on='recipe_id', how='left'
+    )
+    
+    item_predictions_profile['recipe_profile'] = item_predictions_profile.progress_apply(get_recipe_profile, axis=1)
+    user_profile = get_user_profile(user_history)
+
+    print(f"User Profile:\n{json.dumps(user_profile, indent=2)}")
+    display(user_history)
+    display(item_predictions_profile)
+
     # TODO: call LLM
     break
 
 print(sub.shape)
 print(predictions.shape)
 print(true_results.shape)
-display(merged_results)
+display(item_predictions_profile)
 
 hit_rate_at_k(true_results, predictions)
+
 
 
 

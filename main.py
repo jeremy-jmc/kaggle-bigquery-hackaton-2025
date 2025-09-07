@@ -363,16 +363,24 @@ def mean_hit_rate(model, X, y, query_groups, k=5):
     """
     y_pred = model.predict(X)
     results = []
-    
+    y_true_list, y_pred_list = {}, {}
     start = 0
-    for g in query_groups:
+    # for g in query_groups:
+    for _, row in query_groups.reset_index().iterrows():
+        id_ = row['user_id']
+        g = row['count']
+        # print(g)
+
         end = start + g
         y_true_q = y[start:end]
         y_pred_q = y_pred[start:end]
         results.append(hit_rate_at_k(y_true_q, y_pred_q, k))
         start = end
-    
-    return np.mean(results), results
+
+        y_true_list[id_] = y_true_q
+        y_pred_list[id_] = y_pred_q
+
+    return np.mean(results), results, y_true_list, y_pred_list
 
 
 model = XGBRanker(
@@ -394,9 +402,11 @@ model.fit(
 )
 
 # HitRate@5 en train
-train_hit_rate, train_hr_results = mean_hit_rate(model, X_train, y_train, query_list_train, k=5)
+train_hit_rate, train_hr_results, train_true_results, train_pred_results = \
+    mean_hit_rate(model, X_train, y_train, query_list_train, k=5)
 # HitRate@5 en test
-test_hit_rate, test_hr_results = mean_hit_rate(model, X_test, y_test, query_list_test, k=5)
+test_hit_rate, test_hr_results, test_true_results, test_pred_results = \
+    mean_hit_rate(model, X_test, y_test, query_list_test, k=5)
 print(f"HitRate@5 Train: {train_hit_rate:.4f}")
 print(f"HitRate@5 Test:  {test_hit_rate:.4f}")
 
@@ -688,6 +698,8 @@ for idx, row in target_users.iterrows():
     user_history['recipe_profile'] = user_history.progress_apply(get_recipe_profile, axis=1)
     # TODO: get predictions and its recipe profiles to compare with the user history
     sub = X_test.loc[row['user_id']]
+    predictions = train_pred_results[row['user_id']]
+    true_results = train_true_results[row['user_id']]
     # TODO: call LLM
     break
 

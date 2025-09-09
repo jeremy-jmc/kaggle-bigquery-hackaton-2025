@@ -80,86 +80,86 @@ core_val_rating = clean_df(core_val_rating)
 display('val', core_val_rating.dtypes, core_val_rating.describe())
 
 
-
-# -----------------------------------------------------------------------------
-# Filter user by minimum interactions in all splits
-# -----------------------------------------------------------------------------
-K = 5
-u_train = core_train_rating['user_id'].value_counts().loc[lambda s: s >= K].index
-u_val   = core_val_rating['user_id'].value_counts().loc[lambda s: s >= K].index
-
-valid_users = set(u_train).intersection(u_val)
-
-core_train_rating = core_train_rating[core_train_rating['user_id'].isin(valid_users)]
-core_val_rating   = core_val_rating  [core_val_rating  ['user_id'].isin(valid_users)]
-
-
-print(f"Usuarios válidos: {len(valid_users)}")
-print(f"{core_train_rating.shape=}")
-print(f"{core_val_rating.shape=}")
-
-
 # -----------------------------------------------------------------------------
 # Sampling dataset -> ! Working only with `core_val_rating`
 # -----------------------------------------------------------------------------
-PREV_WEEKS = 24
+PREV_WEEKS = 48
 POST_WEEKS = 2
+MIN_INTERACTIONS = 5
+MIN_INTERACTIONS_VAL = 3
 print(f"Using last {PREV_WEEKS} weeks of training data to predict next {POST_WEEKS} weeks of ratings")
+
 # Use training data of last N weeks only
 min_date_val = core_train_rating['dateLastModified'].max() - pd.Timedelta(weeks=PREV_WEEKS)
 core_train_rating = core_train_rating.loc[
     lambda df: df['dateLastModified'] >= min_date_val
 ]
 
-# intersection of users in train, val, test
-experiment_users = set(core_train_rating['user_id']).intersection(set(core_val_rating['user_id']))
-# intersection between train, val, test recipe_id's
-experiment_recipes = (
-    set(core_train_rating.loc[lambda df: df['user_id'].isin(experiment_users)]['recipe_id'])
-    .intersection(set(core_val_rating.loc[lambda df: df['user_id'].isin(experiment_users)]['recipe_id']))
-)
-
-train_users = core_train_rating[
-    core_train_rating['user_id'].isin(experiment_users) & core_train_rating['recipe_id'].isin(experiment_recipes)
-]
-val_users = core_val_rating[
-    core_val_rating['user_id'].isin(experiment_users) & core_val_rating['recipe_id'].isin(experiment_recipes)
-]
-
-print(f"After filtering by common recipes and users: {len(train_users)=}, {len(val_users)=}")
-experiment_users = set(train_users['user_id']).intersection(set(val_users['user_id']))
-experiment_recipes = set(train_users['recipe_id']).intersection(set(val_users['recipe_id']))
-
-train_users = train_users[train_users['user_id'].isin(experiment_users)]
-val_users = val_users[val_users['user_id'].isin(experiment_users)]
-
-# Reduce predictions to next month only
-max_date_val = val_users['dateLastModified'].min() + pd.Timedelta(weeks=POST_WEEKS)
-val_users = val_users.loc[
+# Reduce val predictions to next POST_WEEKS only
+max_date_val = core_val_rating['dateLastModified'].min() + pd.Timedelta(weeks=POST_WEEKS)
+core_val_rating = core_val_rating.loc[
     lambda df: df['dateLastModified'] <= max_date_val
 ]
-val_users = val_users[
-    val_users['user_id'].isin(
-        val_users['user_id'].value_counts().loc[lambda x: x >= 5].index
-    )
-]
-train_users = train_users[train_users['user_id'].isin(val_users['user_id'])]
-val_users = val_users[val_users['user_id'].isin(train_users['user_id'])]
 
+# Find common users and recipes first
+common_users = set(core_train_rating['user_id']).intersection(set(core_val_rating['user_id']))
+common_recipes = set(core_train_rating['recipe_id']).intersection(set(core_val_rating['recipe_id']))
+
+# Filter both datasets to only include common users and recipes
+train_users = core_train_rating[
+    core_train_rating['user_id'].isin(common_users) & 
+    core_train_rating['recipe_id'].isin(common_recipes)
+]
+val_users = core_val_rating[
+    core_val_rating['user_id'].isin(common_users) & 
+    core_val_rating['recipe_id'].isin(common_recipes)
+]
+
+# Now filter by minimum interactions AFTER filtering by common users/recipes
+train_user_counts = train_users['user_id'].value_counts()
+val_user_counts = val_users['user_id'].value_counts()
+train_recipe_counts = train_users['recipe_id'].value_counts()
+val_recipe_counts = val_users['recipe_id'].value_counts()
+
+# Users and recipes with at least MIN_INTERACTIONS interactions in FINAL filtered datasets
+users_min_it_train = set(train_user_counts[train_user_counts >= MIN_INTERACTIONS].index)
+users_min_it_val = set(val_user_counts[val_user_counts >= MIN_INTERACTIONS_VAL].index)
+recipes_min_it_train = set(train_recipe_counts[train_recipe_counts >= MIN_INTERACTIONS].index)
+recipes_min_it_val = set(val_recipe_counts[val_recipe_counts >= MIN_INTERACTIONS_VAL].index)
+
+# Final common users and recipes with minimum interactions
+final_users = users_min_it_train.intersection(users_min_it_val)
+final_recipes = recipes_min_it_train.intersection(recipes_min_it_val)
+
+# Apply final filter
+train_users = train_users[
+    train_users['user_id'].isin(final_users) & 
+    train_users['recipe_id'].isin(final_recipes)
+]
+val_users = val_users[
+    val_users['user_id'].isin(final_users) & 
+    val_users['recipe_id'].isin(final_recipes)
+]
+
+# Apply rating modification
 train_users = modify_rating(train_users)
 val_users = modify_rating(val_users)
 
-train_recipes = val_recipes = test_recipes = \
-    recipes[recipes['recipe_id'].isin(experiment_recipes)]
+# Use final recipes for all recipe datasets
+train_recipes = val_recipes = recipes[recipes['recipe_id'].isin(final_recipes)]
 
-print("Sampled users:", len(experiment_users))
-# Calculate if all `sample_users` are present in val and test splits
-print("Users in val:", len(val_users['user_id'].unique()))
-assert len(val_users['user_id'].unique()) == len(train_users['user_id'].unique()), \
-    "Not all experiment users are present in all splits!"   # len(experiment_users) == 
+# Update common variables for later use
+common_users = final_users
+common_recipes = final_recipes
+
+print(f"Final datasets: {len(train_users)} train interactions, {len(val_users)} val interactions")
+print(f"Users: {len(common_users)}, Recipes: {len(common_recipes)}")
+
+# Verify minimum interactions constraint
+print(f"Min interactions per user in train: {train_users['user_id'].value_counts().min()}")
+print(f"Min interactions per user in val: {val_users['user_id'].value_counts().min()}")
 
 display(train_users['recipe_id'].value_counts().sort_values(ascending=False))
-
 
 
 # -----------------------------------------------------------------------------
@@ -181,16 +181,17 @@ recipe_map = dict(enumerate(recipe_ids.cat.categories))  # idx -> recipe_id
 rows = user_ids.cat.codes.values
 cols = recipe_ids.cat.codes.values
 
-def weight_interactions(df, alpha=20):
+def weight_interactions(df, alpha: int = 20):
     """
     Combine rating strength + recency decay into ALS confidence
+    Try values like 10, 20, 40
     """
-    alpha = 20  # try values like 10, 20, 40
+    
     user_activity = df.groupby("user_id")["recipe_id"].count()
     activity_norm = df["user_id"].map(user_activity).astype(float)
 
     # raw confidence scaling
-    raw_conf = (1 + alpha * df["rating"].astype(float)) / np.sqrt(activity_norm.values)
+    raw_conf = (1 + alpha * df["rating_date"].astype(float)) / np.sqrt(activity_norm.values)
 
     # log-scaling to compress large values
     data = np.log1p(raw_conf)
@@ -209,9 +210,11 @@ train_matrix = bm25_weight(train_matrix.T).T
 
 # Train ALS model
 als_model = implicit.als.AlternatingLeastSquares(
-    factors=64,          # latent dims
+    factors=32,          # latent dims
     regularization=0.05, # L2 reg
     iterations=200,       # ALS steps
+    alpha=2.0,          # confidence scaling
+    calculate_training_loss=True,
     random_state=0
 )
 
@@ -240,24 +243,24 @@ def build_matrix(df, user_ids, recipe_ids, user_transform: bool = False):
 val_matrix  = build_matrix(val_users, user_ids, recipe_ids, True)
 
 
-K = 10
+TOP_K = 25
 # Validation metrics
-val_prec = precision_at_k(als_model, train_matrix.T, val_matrix.T, K=K)
-val_mapk = mean_average_precision_at_k(als_model, train_matrix.T, val_matrix.T, K=K)
-val_ndcg = ndcg_at_k(als_model, train_matrix.T, val_matrix.T, K=K)
+val_prec = precision_at_k(als_model, train_matrix.T, val_matrix.T, K=TOP_K)
+val_mapk = mean_average_precision_at_k(als_model, train_matrix.T, val_matrix.T, K=TOP_K)
+val_ndcg = ndcg_at_k(als_model, train_matrix.T, val_matrix.T, K=TOP_K)
 
 print(f"Metrics of model trained on {PREV_WEEKS} weeks to predict next {POST_WEEKS} weeks:")
 print(f"Users: {len(user_map)}, Recipes: {len(recipe_map)}")
-print(f"Validation Precision@{K}: {val_prec:.4f}")
-print(f"Validation MAP@{K}: {val_mapk:.4f}")
-print(f"Validation NDCG@{K}: {val_ndcg:.4f}")
+print(f"Validation Precision@{TOP_K}: {val_prec:.4f}")
+print(f"Validation MAP@{TOP_K}: {val_mapk:.4f}")
+print(f"Validation NDCG@{TOP_K}: {val_ndcg:.4f}")
 
 
 # -----------------------------------------------------------------------------
 # Item Features (Recipes Nutrition)
 # -----------------------------------------------------------------------------
 
-all_recipes = pd.concat([train_recipes, val_recipes, test_recipes]).drop_duplicates(subset=['recipe_id'])
+all_recipes = pd.concat([train_recipes, val_recipes]).drop_duplicates(subset=['recipe_id'])
 nutrition_values = []
 for idx, row in tqdm(all_recipes.iterrows(), total=len(all_recipes)):
     nutritions_dict = ast.literal_eval(row['nutritions'])
@@ -329,7 +332,7 @@ val_X_u = get_user_features(val_users)
 val_X_dates = val_users[['user_id', 'dateLastModified']].sort_values(by=['dateLastModified'], ascending=False).drop_duplicates(subset=['user_id'], keep='first').reset_index(drop=True)
 val_y = val_users[['user_id', 'recipe_id', 'rating', 'rating_date']]
 
-print(f"{set(test_recipes['recipe_id'].values).issubset(train_recipes['recipe_id'].values)=}")
+print(f"{set(val_recipes['recipe_id'].values).issubset(train_recipes['recipe_id'].values)=}")
 
 def get_model_input(X_u, X_m, y):
     merged = pd.merge(X_u, y, on=['user_id'], how='inner')
@@ -675,7 +678,7 @@ for idx, row in tqdm(all_recipes.iterrows(), total=len(all_recipes)):
         })
 
 reviews_df = pd.DataFrame(reviews).loc[
-    lambda df: df['user_id'].isin(experiment_users)
+    lambda df: df['user_id'].isin(common_users)
 ]
 display(reviews_df)
 

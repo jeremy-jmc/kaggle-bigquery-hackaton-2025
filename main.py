@@ -1,4 +1,5 @@
 
+
 import ast
 import seaborn as sns
 from tqdm import tqdm
@@ -12,6 +13,7 @@ from scipy import sparse
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import StandardScaler
 from dotenv import load_dotenv
+import json 
 
 np.set_printoptions(suppress=True, precision=2)
 pd.set_option("display.float_format", "{:.3f}".format)
@@ -22,9 +24,9 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 random.seed(0)
 
-recipes = pd.read_csv('./data/food_recsys/raw-data_recipe.csv')
+recipes = pd.read_csv('./data/food_recsys/raw/raw-data_recipe.csv')
 recipes['recipe_id'] = recipes['recipe_id'].astype(str)
-interactions = pd.read_csv('./data/food_recsys/raw-data_interaction.csv')
+interactions = pd.read_csv('./data/food_recsys/raw/raw-data_interaction.csv')
 interactions['user_id'] = interactions['user_id'].astype(str)
 interactions['recipe_id'] = interactions['recipe_id'].astype(str)
 
@@ -32,7 +34,7 @@ display('recipes', recipes.head(5))
 display('interactions', interactions.head(5))
 
 
-core_recipes = pd.read_csv('./data/food_recsys/core-data_recipe.csv')
+core_recipes = pd.read_csv('./data/food_recsys/raw/core-data_recipe.csv')
 
 
 def modify_rating(core: pd.DataFrame):
@@ -63,19 +65,19 @@ def clean_df(core: pd.DataFrame) -> pd.DataFrame:
     return core
 
 
-core_train_rating = pd.read_csv('./data/food_recsys/core-data-train_rating.csv')
+core_train_rating = pd.read_csv('./data/food_recsys/raw/core-data-train_rating.csv')
 core_train_rating = clean_df(core_train_rating)
 display('train', core_train_rating.dtypes, core_train_rating.describe())
 print(f"{core_train_rating.shape=}")
 core_train_rating['user_id'].value_counts().reset_index().hist(bins=50, log=True)   # .loc[lambda df: df['count'] > 10]['count']
 
 
-core_test_rating = pd.read_csv('./data/food_recsys/core-data-test_rating.csv')
+core_test_rating = pd.read_csv('./data/food_recsys/raw/core-data-test_rating.csv')
 core_test_rating = clean_df(core_test_rating)
 display('test', core_test_rating.dtypes, core_test_rating.describe())
 
 
-core_val_rating = pd.read_csv('./data/food_recsys/core-data-valid_rating.csv')
+core_val_rating = pd.read_csv('./data/food_recsys/raw/core-data-valid_rating.csv')
 core_val_rating = clean_df(core_val_rating)
 display('val', core_val_rating.dtypes, core_val_rating.describe())
 
@@ -160,6 +162,16 @@ print(f"Min interactions per user in train: {train_users['user_id'].value_counts
 print(f"Min interactions per user in val: {val_users['user_id'].value_counts().min()}")
 
 display(train_users['recipe_id'].value_counts().sort_values(ascending=False))
+
+
+with open("data/food_recsys/processed/final_recipes.json", "w", encoding="utf-8") as f:
+    json.dump(list(final_recipes), f, ensure_ascii=False, indent=2)
+
+with open("data/food_recsys/processed/final_users.json", "w", encoding="utf-8") as f:
+    json.dump(list(final_users), f, ensure_ascii=False, indent=2)
+
+train_users.to_csv("data/food_recsys/processed/train_users.csv", index=False)
+val_users.to_csv("data/food_recsys/processed/val_users.csv", index=False)   
 
 
 # -----------------------------------------------------------------------------

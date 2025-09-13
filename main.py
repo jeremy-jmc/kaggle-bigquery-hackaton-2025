@@ -243,7 +243,7 @@ def build_matrix(df, user_ids, recipe_ids, user_transform: bool = False):
 val_matrix  = build_matrix(val_users, user_ids, recipe_ids, True)
 
 
-TOP_K = 25
+TOP_K = 5
 # Validation metrics
 val_prec = precision_at_k(als_model, train_matrix.T, val_matrix.T, K=TOP_K)
 val_mapk = mean_average_precision_at_k(als_model, train_matrix.T, val_matrix.T, K=TOP_K)

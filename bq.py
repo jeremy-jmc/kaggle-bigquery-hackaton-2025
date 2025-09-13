@@ -31,14 +31,13 @@ df = bpd.read_gbq(VALID_INTERACTIONS)
 
 client = bigquery.Client()
 
-# -----------------------------------------------------------------------------
-# Sample query to validate connection
-# -----------------------------------------------------------------------------
+def schema_to_prompt_with_descriptions(model_class) -> str:
+    prompt = ""
+    for k, v in model_class.model_json_schema()['properties'].items():
+        desc = v.get('description', '')
+        prompt += f" {k} ({desc}) "
+    return f"[ {prompt} ]"
 
-validation_rows = client.query_and_wait(f"""
-SELECT * FROM `{VALID_INTERACTIONS}` LIMIT 5
-""")
-df_validation = validation_rows.to_dataframe()
 
 # -----------------------------------------------------------------------------
 # Create a model endpoint in project
@@ -58,6 +57,7 @@ REMOTE WITH
     OPTIONS (ENDPOINT = 'gemini-embedding-001');
 """)
 
+# * RECIPES
 # -----------------------------------------------------------------------------
 # PARSING: Generate new parsed columns for `df_recipes` into a new table called `recipe_profiles`
 # -----------------------------------------------------------------------------
@@ -118,14 +118,6 @@ class RecipeProfile(BaseModel):
     serving_daypart: List[str] = Field(description="Suitable dayparts, e.g., breakfast, lunch, dinner")
     notes: str = Field(description="Short rationale for the profile")
     justification: str = Field(description="Detailed explanation of how the profile was determined Describe why the food type, cuisine type, dietary preferences, flavor profile, and serving daypart were chosen based on the ingredients and cooking directions. Is not allowed to use quotes or complex punctuation in this field.")
-
-
-def schema_to_prompt_with_descriptions(model_class) -> str:
-    prompt = ""
-    for k, v in model_class.model_json_schema()['properties'].items():
-        desc = v.get('description', '')
-        prompt += f" {k} ({desc}) "
-    return f"[ {prompt} ]"
 
 
 prompt_text = f"Based on the title, ingredients, and cooking directions provided, create a recipe profile that summarizes the key characteristics of this recipe. Your response must follow this exact structure: {schema_to_prompt_with_descriptions(RecipeProfile)}. IMPORTANT: Do not use quotation marks or complex punctuation in your response. Use simple words and avoid any quotes, apostrophes, or special characters."
@@ -207,6 +199,53 @@ WHERE t.recipe_id = s.recipe_id
 # -----------------------------------------------------------------------------
 
 df_recipes_profiles_to_vs = bpd.read_gbq(f"""SELECT * FROM `{RECIPES_PROFILES_TABLE}`""")
+
+
+# * USERS
+# -----------------------------------------------------------------------------
+# ...
+# -----------------------------------------------------------------------------
+
+class UserProfile(BaseModel):
+    liked_cuisines: List[str] = Field(description="List of cuisines the user enjoys most, ranked by preference based on their interaction history and ratings")
+    cuisine_preference: str = Field(description="Primary cuisine type the user gravitates towards (e.g., 'Mediterranean', 'Asian Fusion', 'Traditional American')")
+    dietary_preference: str = Field(description="Main dietary restriction or lifestyle the user follows (e.g., 'Vegetarian', 'Low-carb', 'No restrictions')")
+
+    food_preferences: List[str] = Field(description="Preferred food categories and meal types (e.g., 'comfort food', 'healthy salads', 'baked goods', 'grilled meats')")
+    cuisine_preferences: List[str] = Field(description="Specific regional or ethnic cuisines the user frequently rates highly (e.g., 'Thai', 'Southern BBQ', 'French pastry')")
+    dietary_preferences: List[str] = Field(description="Dietary restrictions, health considerations, or eating patterns (e.g., 'gluten-free', 'plant-based', 'high-protein', 'dairy-free')")
+    flavor_preferences: List[str] = Field(description="Dominant taste profiles and flavor characteristics the user seeks (e.g., 'bold and spicy', 'mild and creamy', 'tangy and citrusy')")
+    daypart_preferences: List[str] = Field(description="Preferred times of day for different meal types based on rating patterns (e.g., 'hearty breakfast', 'light lunch', 'elaborate dinner')")
+    lifestyle_tags: List[str] = Field(description="Behavioral patterns and cooking style indicators inferred from recipe choices (e.g., 'quick meals', 'entertainer', 'health-conscious', 'experimental cook')")
+    notes: str = Field(description="Brief summary explaining the user's overall food personality and any notable patterns in their preferences")
+    justification: str = Field(description="Detailed explanation of how the profile was determined based on the user's interaction history and ratings. Describe why the liked cuisines, cuisine preference, dietary preference, food preferences, cuisine preferences, dietary preferences, flavor preferences, daypart preferences, and lifestyle tags were chosen. Is not allowed to use quotes or complex punctuation in this field.")
+
+
+subset_cols = 'user_id, recipe_id, rating, datelastmodified'
+df_train_users = client.query_and_wait(f"""SELECT {subset_cols} FROM `{TRAIN_INTERACTIONS}`""").to_dataframe()
+df_valid_users = client.query_and_wait(f"""SELECT {subset_cols} FROM `{VALID_INTERACTIONS}`""").to_dataframe()
+
+print(df_train_users.describe())
+print(df_valid_users.describe())
+
+df_users_to_profile = df_valid_users.copy().drop_duplicates(['user_id'], keep='first')[['user_id', 'datelastmodified']].reset_index(drop=True)
+
+
+def get_user_history(user_id: int, n: int = 25) -> list:
+    """Get the top-n most recent recipes the user has interacted with."""
+    user_history = df_train_users[df_train_users['user_id'] == user_id]
+    user_history = user_history.sort_values(by='datelastmodified', ascending=False).head(n)
+    
+    return user_history[['recipe_id', 'rating']].to_dict('records')
+
+    # recipe_ids = user_history['recipe_id'].unique().tolist()
+    # return recipe_ids
+
+    # recipes = df_recipes_profiles_to_vs[df_recipes_profiles_to_vs['recipe_id'].isin(recipe_ids)]
+    # titles = recipes['title'].tolist()
+    # return "\n".join([f"- {t}" for t in titles])
+
+df_users_to_profile['user_history'] = df_users_to_profile['user_id'].apply(get_user_history)
 
 
 # https://cloud.google.com/python/docs/reference/bigframes/latest

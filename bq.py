@@ -24,11 +24,16 @@ TRAIN_INTERACTIONS = f"{PROJECT_ID}.{SCHEMA_NAME}.train_interactions_windowed"
 RECIPES_ALL = f"{PROJECT_ID}.{SCHEMA_NAME}.recipes"
 SUBSET_RECIPE_IDS = f"{PROJECT_ID}.{SCHEMA_NAME}.final_recipes"
 
-RECIPE_PROFILES_TABLE = f'{SCHEMA_NAME}.recipe_profiles'
+RECIPES_PARSED = f'{SCHEMA_NAME}.recipes_parsed'
+RECIPES_PROFILES_TABLE = f"{SCHEMA_NAME}.recipe_profiles"
 
 df = bpd.read_gbq(VALID_INTERACTIONS)
 
 client = bigquery.Client()
+
+# -----------------------------------------------------------------------------
+# Sample query to validate connection
+# -----------------------------------------------------------------------------
 
 validation_rows = client.query_and_wait(f"""
 SELECT * FROM `{VALID_INTERACTIONS}` LIMIT 5
@@ -54,7 +59,7 @@ REMOTE WITH
 """)
 
 # -----------------------------------------------------------------------------
-# Generate new columns for `df_recipes` into a new table called `recipe_profiles`
+# PARSING: Generate new parsed columns for `df_recipes` into a new table called `recipe_profiles`
 # -----------------------------------------------------------------------------
 
 def prep_ingredients(text: str) -> str:
@@ -95,14 +100,14 @@ df_recipes = bpd.DataFrame(df_recipes_pandas)
 
 # Upload the new table in BigQuery
 df_recipes.to_gbq(
-    destination_table=f"{PROJECT_ID}.{RECIPE_PROFILES_TABLE}",
+    destination_table=f"{PROJECT_ID}.{RECIPES_PARSED}",
     if_exists='replace',
     # project_id=PROJECT_ID
 )
 
 
 # -----------------------------------------------------------------------------
-# Recipe Profiles
+# TEXT + EMBEDDING GENERATION: Recipe Profiles
 # -----------------------------------------------------------------------------
 
 class RecipeProfile(BaseModel):
@@ -112,6 +117,7 @@ class RecipeProfile(BaseModel):
     flavor_profile: List[str] = Field(description="Flavor profile, e.g., spicy, sweet, savory")
     serving_daypart: List[str] = Field(description="Suitable dayparts, e.g., breakfast, lunch, dinner")
     notes: str = Field(description="Short rationale for the profile")
+    justification: str = Field(description="Detailed explanation of how the profile was determined Describe why the food type, cuisine type, dietary preferences, flavor profile, and serving daypart were chosen based on the ingredients and cooking directions. Is not allowed to use quotes or complex punctuation in this field.")
 
 
 def schema_to_prompt_with_descriptions(model_class) -> str:
@@ -122,31 +128,85 @@ def schema_to_prompt_with_descriptions(model_class) -> str:
     return f"[ {prompt} ]"
 
 
-prompt_text = f"Based on the title, following ingredients and cooking directions, create a recipe profile that summarizes the key aspects of the recipe. The answer must follow this structure:{schema_to_prompt_with_descriptions(RecipeProfile)}"
+prompt_text = f"Based on the title, ingredients, and cooking directions provided, create a recipe profile that summarizes the key characteristics of this recipe. Your response must follow this exact structure: {schema_to_prompt_with_descriptions(RecipeProfile)}. IMPORTANT: Do not use quotation marks or complex punctuation in your response. Use simple words and avoid any quotes, apostrophes, or special characters."
 
 query = f"""
-SELECT s.recipe_id, s.title, s.ingredients, s.cooking_directions, s.nutritions, s.reviews, s.parsed_ingredients, s.parsed_recipe, 
-AI.GENERATE(('{prompt_text}', s.parsed_ingredients, s.parsed_recipe),
-    connection_id => '{CONNECTION_ID}',
-    endpoint => 'gemini-2.5-flash',
-    model_params => JSON '{{"generationConfig":{{"temperature": 0.5, "maxOutputTokens": 1024, "thinking_config": {{"thinking_budget": 1024}} }} }}',
-    output_schema => 'food_type STRING, cuisine_type STRING, dietary_preferences ARRAY<STRING>, flavor_profile ARRAY<STRING>, serving_daypart ARRAY<STRING>, notes STRING'
-).full_response AS recipe_profile
-FROM (SELECT * FROM `{RECIPE_PROFILES_TABLE}` LIMIT 5) s
+WITH ai_responses AS (
+  SELECT 
+    s.recipe_id, 
+    s.title, 
+    s.ingredients, 
+    s.cooking_directions, 
+    s.nutritions, 
+    s.reviews, 
+    s.parsed_ingredients, 
+    s.parsed_recipe,
+    AI.GENERATE(('{prompt_text}', s.parsed_ingredients, s.parsed_recipe),
+        connection_id => '{CONNECTION_ID}',
+        endpoint => 'gemini-2.5-pro',
+        model_params => JSON '{{"generationConfig":{{"temperature": 0.0, "maxOutputTokens": 1024, "thinking_config": {{"thinking_budget": 1024}} }} }}',
+        output_schema => 'food_type STRING, cuisine_type STRING, dietary_preferences ARRAY<STRING>, flavor_profile ARRAY<STRING>, serving_daypart ARRAY<STRING>, notes STRING, justification STRING'
+    ) AS ai_result
+  FROM (SELECT * FROM `{RECIPES_PARSED}` LIMIT 2) s
+)
+SELECT 
+  *,
+  ai_result.full_response AS recipe_profile,
+  JSON_EXTRACT_SCALAR(ai_result.full_response, '$.candidates[0].content.parts[0].text') AS recipe_profile_text
+FROM ai_responses
 """
 
 print(query)
 
 recipe_rows = client.query_and_wait(query)
-df_profiles = recipe_rows.to_dataframe()
+df_recipes_profiles = recipe_rows.to_dataframe()
 
-response = json.loads(df_profiles['recipe_profile'].iloc[0])
+response = json.loads(df_recipes_profiles['recipe_profile'].iloc[0])
 r_profile = json.loads(response['candidates'][0]['content']['parts'][0]['text'])
                       
 print(json.dumps(response, indent=2))
+print(json.dumps(json.loads(df_recipes_profiles['recipe_profile_text'].iloc[0]), indent=2))
+
+df_recipes_profiles.to_gbq(
+    destination_table=f"{PROJECT_ID}.{RECIPES_PROFILES_TABLE}",
+    if_exists='replace',
+    # project_id=PROJECT_ID
+)
 
 
-# print(df_profiles['combined_text'].iloc[0])
+client.query_and_wait(f"""
+ALTER TABLE `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}`
+ADD COLUMN text_embedding ARRAY<FLOAT64>
+""")
+
+# Create Vector Embeddings for the recipe profiles
+client.query_and_wait(f"""
+UPDATE `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}` AS t
+SET t.text_embedding = s.ml_generate_embedding_result
+FROM (
+  SELECT
+    recipe_id,
+    ml_generate_embedding_result
+  FROM
+    ML.GENERATE_EMBEDDING(
+      MODEL `{SCHEMA_NAME}.text_embedding_model`,
+      (
+        SELECT
+          recipe_id,
+          recipe_profile_text AS content
+        FROM `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}`
+      ),
+      STRUCT(TRUE AS flatten_json_output)
+    )
+) AS s
+WHERE t.recipe_id = s.recipe_id
+""")
+
+# -----------------------------------------------------------------------------
+# TODO: VECTOR SEARCH & EVAL
+# -----------------------------------------------------------------------------
+
+df_recipes_profiles_to_vs = bpd.read_gbq(f"""SELECT * FROM `{RECIPES_PROFILES_TABLE}`""")
 
 
 # https://cloud.google.com/python/docs/reference/bigframes/latest

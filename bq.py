@@ -120,9 +120,9 @@ class RecipeProfile(BaseModel):
     justification: str = Field(description="Detailed explanation of how the profile was determined Describe why the food type, cuisine type, dietary preferences, flavor profile, and serving daypart were chosen based on the ingredients and cooking directions. Is not allowed to use quotes or complex punctuation in this field.")
 
 
-prompt_text = f"Based on the title, ingredients, and cooking directions provided, create a recipe profile that summarizes the key characteristics of this recipe. Your response must follow this exact structure: {schema_to_prompt_with_descriptions(RecipeProfile)}. IMPORTANT: Do not use quotation marks or complex punctuation in your response. Use simple words and avoid any quotes, apostrophes, or special characters."
+recipe_profile_prompt = f"""Based on the title, ingredients, and cooking directions provided, create a recipe profile that summarizes the key characteristics of this recipe. Your response must follow this exact structure: {schema_to_prompt_with_descriptions(RecipeProfile)}. IMPORTANT: Do not use quotation marks or complex punctuation in your response. Use simple words and avoid any quotes, apostrophes, or special characters."""
 
-query = f"""
+recipe_profile_generation_query = f"""
 WITH ai_responses AS (
   SELECT 
     s.recipe_id, 
@@ -133,24 +133,24 @@ WITH ai_responses AS (
     s.reviews, 
     s.parsed_ingredients, 
     s.parsed_recipe,
-    AI.GENERATE(('{prompt_text}', s.parsed_ingredients, s.parsed_recipe),
+    AI.GENERATE(('{recipe_profile_prompt}', s.parsed_ingredients, s.parsed_recipe),
         connection_id => '{CONNECTION_ID}',
         endpoint => 'gemini-2.5-pro',
-        model_params => JSON '{{"generationConfig":{{"temperature": 0.0, "maxOutputTokens": 1024, "thinking_config": {{"thinking_budget": 1024}} }} }}',
+        model_params => JSON '{{"generationConfig":{{"temperature": 0.0, "maxOutputTokens": 2048, "thinking_config": {{"thinking_budget": 1024}} }} }}',
         output_schema => 'food_type STRING, cuisine_type STRING, dietary_preferences ARRAY<STRING>, flavor_profile ARRAY<STRING>, serving_daypart ARRAY<STRING>, notes STRING, justification STRING'
     ) AS ai_result
-  FROM (SELECT * FROM `{RECIPES_PARSED}` LIMIT 2) s
+  FROM (SELECT * FROM `{RECIPES_PARSED}`) s
 )
 SELECT 
   *,
   ai_result.full_response AS recipe_profile,
   JSON_EXTRACT_SCALAR(ai_result.full_response, '$.candidates[0].content.parts[0].text') AS recipe_profile_text
 FROM ai_responses
-"""
+"""         #  LIMIT 2
 
-print(query)
+print(recipe_profile_generation_query)
 
-recipe_rows = client.query_and_wait(query)
+recipe_rows = client.query_and_wait(recipe_profile_generation_query)
 df_recipes_profiles = recipe_rows.to_dataframe()
 
 response = json.loads(df_recipes_profiles['recipe_profile'].iloc[0])
@@ -246,6 +246,9 @@ def get_user_history(user_id: int, n: int = 25) -> list:
     # return "\n".join([f"- {t}" for t in titles])
 
 df_users_to_profile['user_history'] = df_users_to_profile['user_id'].apply(get_user_history)
+
+
+user_profile_prompt = f"""You are a user profile expert specializing in analyzing user preferences based on their recipe interactions. Your task is to generate a structured user profile that captures their culinary tastes, dietary preferences, flavor inclinations, among others. Ensure the profile is concise and accurately reflects the user's food personality based on their interaction history. Please provide a structured profile of the user using the following format: {schema_to_prompt_with_descriptions(UserProfile)}. IMPORTANT: Do not use quotation marks or complex punctuation in your response. Use simple words and avoid any quotes, apostrophes, or special characters. Use the following interaction history as reference:"""
 
 
 # https://cloud.google.com/python/docs/reference/bigframes/latest

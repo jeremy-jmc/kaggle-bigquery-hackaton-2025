@@ -17,10 +17,14 @@ subprocess.run(['gcloud', 'auth', 'application-default', 'set-quota-project', PR
 
 bpd.options.bigquery.project = PROJECT_ID
 
-VALID_INTERACTIONS = f"{PROJECT_ID}.foodrecsys.valid_interactions_windowed"
-TRAIN_INTERACTIONS = f"{PROJECT_ID}.foodrecsys.train_interactions_windowed"
-RECIPES_ALL = f"{PROJECT_ID}.foodrecsys.recipes"
-SUBSET_RECIPE_IDS = f"{PROJECT_ID}.foodrecsys.final_recipes"
+CONNECTION_ID = 'us.kaggle-connection'
+SCHEMA_NAME = 'foodrecsys'
+VALID_INTERACTIONS = f"{PROJECT_ID}.{SCHEMA_NAME}.valid_interactions_windowed"
+TRAIN_INTERACTIONS = f"{PROJECT_ID}.{SCHEMA_NAME}.train_interactions_windowed"
+RECIPES_ALL = f"{PROJECT_ID}.{SCHEMA_NAME}.recipes"
+SUBSET_RECIPE_IDS = f"{PROJECT_ID}.{SCHEMA_NAME}.final_recipes"
+
+RECIPE_PROFILES_TABLE = f'{SCHEMA_NAME}.recipe_profiles'
 
 df = bpd.read_gbq(VALID_INTERACTIONS)
 
@@ -31,6 +35,23 @@ SELECT * FROM `{VALID_INTERACTIONS}` LIMIT 5
 """)
 df_validation = validation_rows.to_dataframe()
 
+# -----------------------------------------------------------------------------
+# Create a model endpoint in project
+# -----------------------------------------------------------------------------
+client.query_and_wait(f"""
+CREATE OR REPLACE MODEL
+  `{SCHEMA_NAME}.gemini_2_5_flash`
+REMOTE WITH
+    CONNECTION `{CONNECTION_ID}`
+    OPTIONS (ENDPOINT = 'gemini-2.5-flash');
+""")
+
+client.query_and_wait(f"""
+CREATE OR REPLACE MODEL `{SCHEMA_NAME}.text_embedding_model`
+REMOTE WITH 
+    CONNECTION `{CONNECTION_ID}`
+    OPTIONS (ENDPOINT = 'gemini-embedding-001');
+""")
 
 # -----------------------------------------------------------------------------
 # Generate new columns for `df_recipes` into a new table called `recipe_profiles`
@@ -73,9 +94,8 @@ df_recipes_pandas['parsed_recipe'] = df_recipes_pandas['cooking_directions'].app
 df_recipes = bpd.DataFrame(df_recipes_pandas)
 
 # Upload the new table in BigQuery
-PROFILE_TABLES = 'foodrecsys.recipe_profiles'
 df_recipes.to_gbq(
-    destination_table=f"{PROJECT_ID}.{PROFILE_TABLES}",
+    destination_table=f"{PROJECT_ID}.{RECIPE_PROFILES_TABLE}",
     if_exists='replace',
     # project_id=PROJECT_ID
 )
@@ -107,12 +127,12 @@ prompt_text = f"Based on the title, following ingredients and cooking directions
 query = f"""
 SELECT s.recipe_id, s.title, s.ingredients, s.cooking_directions, s.nutritions, s.reviews, s.parsed_ingredients, s.parsed_recipe, 
 AI.GENERATE(('{prompt_text}', s.parsed_ingredients, s.parsed_recipe),
-    connection_id => 'us.kaggle-connection',
+    connection_id => '{CONNECTION_ID}',
     endpoint => 'gemini-2.5-flash',
     model_params => JSON '{{"generationConfig":{{"temperature": 0.5, "maxOutputTokens": 1024, "thinking_config": {{"thinking_budget": 1024}} }} }}',
     output_schema => 'food_type STRING, cuisine_type STRING, dietary_preferences ARRAY<STRING>, flavor_profile ARRAY<STRING>, serving_daypart ARRAY<STRING>, notes STRING'
 ).full_response AS recipe_profile
-FROM (SELECT * FROM `{PROFILE_TABLES}` LIMIT 5) s
+FROM (SELECT * FROM `{RECIPE_PROFILES_TABLE}` LIMIT 5) s
 """
 
 print(query)

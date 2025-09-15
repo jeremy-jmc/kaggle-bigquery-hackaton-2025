@@ -7,7 +7,9 @@ import bigframes.pandas as bpd
 from google.cloud import bigquery
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
+from tqdm import tqdm
 from dotenv import load_dotenv
+from IPython.display import display
 load_dotenv()
 pd.set_option('display.max_colwidth', 100)
 
@@ -32,6 +34,8 @@ RECIPES_PROFILES_TABLE = f"{SCHEMA_NAME}.recipe_profiles"
 
 USERS_PARSED = f'{SCHEMA_NAME}.users_parsed'
 USERS_PROFILES_TABLE = f"{SCHEMA_NAME}.user_profiles"
+
+VECTOR_SEARCH_RESULTS_TABLE = f"{SCHEMA_NAME}.vector_search_results"
 
 df = bpd.read_gbq(VALID_INTERACTIONS)
 
@@ -122,6 +126,13 @@ class RecipeProfile(BaseModel):
     dietary_preferences: List[str] = Field(description="Dietary preferences, e.g., vegetarian, vegan, gluten-free")
     flavor_profile: List[str] = Field(description="Flavor profile, e.g., spicy, sweet, savory")
     serving_daypart: List[str] = Field(description="Suitable dayparts, e.g., breakfast, lunch, dinner")
+    # TODO: add these fields later
+    # cooking_method: str = Field(description="Main preparation method (e.g., grilled, baked, stir-fried, raw)")
+    # complexity: str = Field(description="Estimated skill or effort required (e.g., easy, intermediate, advanced)")
+    # # nutritional_tags: List[str] = Field(description="Health or nutrition tags (e.g., high-protein, low-carb, low-calorie)")
+    # # occasion_tags: List[str] = Field(description="Occasions this recipe suits (e.g., everyday meal, party dish, festive special)")
+    # ingredient_anchors: List[str] = Field(description="General ingredient families central to the recipe (e.g., poultry, legumes, seafood, grains, leafy greens)")
+    
     notes: str = Field(description="Short rationale for the profile")
     justification: str = Field(description="Detailed explanation of how the profile was determined Describe why the food type, cuisine type, dietary preferences, flavor profile, and serving daypart were chosen based on the ingredients and cooking directions. Is not allowed to use quotes or complex punctuation in this field.")
 
@@ -206,6 +217,21 @@ WHERE t.recipe_id = s.recipe_id
 # -----------------------------------------------------------------------------
 
 df_recipe_profiles = client.query_and_wait(f"""SELECT * EXCEPT(text_embedding) FROM `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}`""").to_dataframe()
+
+reviews = []
+for idx, row in tqdm(df_recipe_profiles.iterrows(), total=len(df_recipe_profiles)):
+    recipe_id = row['recipe_id']
+    interactions_dict = ast.literal_eval(row['reviews'])
+    for k, v in interactions_dict.items():
+        reviews.append({
+            'recipe_id': recipe_id,
+            'user_id': str(k),
+            **v
+        })
+reviews_df = pd.DataFrame(reviews)
+reviews_df.columns = reviews_df.columns.str.lower()
+reviews_df['datelastmodified'] = pd.to_datetime(reviews_df['datelastmodified'], format='mixed')
+
 subset_cols = 'user_id, recipe_id, rating, datelastmodified'
 df_train_users = client.query_and_wait(f"""SELECT {subset_cols} FROM `{TRAIN_INTERACTIONS}`""").to_dataframe()
 df_valid_users = client.query_and_wait(f"""SELECT {subset_cols} FROM `{VALID_INTERACTIONS}`""").to_dataframe()
@@ -214,6 +240,10 @@ df_valid_users = client.query_and_wait(f"""SELECT {subset_cols} FROM `{VALID_INT
 final_users = set(df_train_users['user_id'].unique()).intersection(set(df_valid_users['user_id'].unique()))
 print(f"Final users: {len(final_users)}")
 df_train_users = df_train_users[df_train_users['user_id'].isin(final_users)].reset_index(drop=True)
+df_train_users['datelastmodified'] = pd.to_datetime(df_train_users['datelastmodified'])
+df_train_users = df_train_users.merge(
+    reviews_df[['user_id', 'recipe_id', 'datelastmodified', 'text']], how='left', on=['user_id', 'recipe_id', 'datelastmodified']
+).rename(columns={'text': 'user_comment'})
 df_valid_users = df_valid_users[df_valid_users['user_id'].isin(final_users)].reset_index(drop=True)
 
 print(df_train_users.describe())
@@ -230,7 +260,7 @@ def get_user_history(user_id: int, n: int = 25) -> list:
     user_history = user_history.sort_values(by='datelastmodified', ascending=False).head(n)
     user_history['date'] = user_history['datelastmodified'].dt.strftime('%Y-%m-%d')
 
-    return user_history[['recipe_id', 'rating', 'date']].to_dict('records')
+    return user_history[['recipe_id', 'rating', 'date', 'user_comment']].to_dict('records')
 
     # recipe_ids = user_history['recipe_id'].unique().tolist()
     # return recipe_ids
@@ -252,11 +282,11 @@ def format_user_history(user_history: list[dict]) -> str:
         user_info += (
             f"\n>>> Recipe Title: {recipe_metadata['title']}\n"
             f">>> User Rating: {entry['rating']}\n"
-            f">>> Date of Interaction: {entry['date']}\n"
-            # TODO: Faltan estas columnas
-            # f"User Comment: {row['text']}\n"
+            f">>> Date of Interaction: {entry['date']}\n\n"
+            f">>> User Comment: {entry['user_comment']}\n\n"
+            # TODO: Falta esa columnas
             # f"Recipe Average Rating: {row['aver_rate']}\n"
-            f">>> Ingredients:\n{recipe_metadata['parsed_ingredients']}\n"
+            f">>> Ingredients:\n{recipe_metadata['parsed_ingredients']}\n\n"
             f">>> Cooking Directions:\n{recipe_metadata['parsed_recipe']}\n"
         )
         user_info += "--------------------------------------------\n"
@@ -297,6 +327,9 @@ class UserProfile(BaseModel):
     flavor_preferences: List[str] = Field(description="Dominant taste profiles and flavor characteristics the user seeks (e.g., bold and spicy, mild and creamy, tangy and citrusy)")
     daypart_preferences: List[str] = Field(description="Preferred times of day for different meal types based on rating patterns (e.g., hearty breakfast, light lunch, elaborate dinner)")
     lifestyle_tags: List[str] = Field(description="Behavioral patterns and cooking style indicators inferred from recipe choices (e.g., quick meals, entertainer, health-conscious, experimental cook)")
+    convenience_preference: str = Field(description="Preference for recipe complexity (e.g., quick and easy, gourmet elaborate)")
+    diversity_openness: str = Field(description="Willingness to try new cuisines (e.g., adventurous, selective, traditionalist, not defined)")
+
     notes: str = Field(description="Brief summary explaining the users overall food personality and any notable patterns in their preferences") # . Do not mention specific food names because this is a profile that summarizes the users food personality
     justification: str = Field(description="Detailed explanation of how the profile was determined based on the users interaction history and ratings. Describe why the liked cuisines, cuisine preference, dietary preference, food preferences, cuisine preferences, dietary preferences, flavor preferences, daypart preferences, and lifestyle tags were chosen. Is not allowed to use quotes or complex punctuation in this field. Keep it between 100 and 200 words not more.")
 
@@ -434,16 +467,20 @@ hit_rate_table = matches.groupby('user_id', as_index=False).agg({
     'recipe_profile_text': list,
     'title': list,
     'user_profile_text': 'first',   # or unique
+    'n_history': 'first'
 })
 hit_rate_table['hit'] = hit_rate_table.apply(lambda row: any(r in row['rec_gt'] for r in row['recipe_id']), axis=1)
 hit_rate_table['hit_count'] = hit_rate_table.apply(lambda row: sum(1 for r in row['rec_gt'] if r in row['recipe_id']), axis=1)
 hit_rate_table['hit_proportion'] = hit_rate_table['hit_count'] / hit_rate_table['rec_gt'].apply(len)
 
 avg_hit_prop = hit_rate_table['hit_proportion'].mean()
-hit_rate_table['hit_proportion'].plot(kind='hist', bins=20, title=f'Hit Proportion @ {TOP_K} => {avg_hit_prop:.2f}')
-print(f"{avg_hit_prop=:.2f}")       # 0.28 until now
+std_hit_prop = hit_rate_table['hit_proportion'].std()
+hit_rate_table['hit_proportion'].plot(kind='hist', bins=20, title=f'Hit Proportion @ {TOP_K} -> {avg_hit_prop:.2f}')
+print(f"{avg_hit_prop=:.2f} {std_hit_prop=:.2f}")       # 0.31 until now
 
-hit_rate_table.loc[lambda df: df['hit_proportion'] == 0]
+display(hit_rate_table.loc[lambda df: df['hit_proportion'] == 0])
+hit_rate_table.loc[lambda df: df['hit_proportion'] != 0]['n_history'].hist(bins=20)
+hit_rate_table.loc[lambda df: df['hit_proportion'] == 0]['n_history'].hist(bins=20)
 
 # TABLE `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}`,
 # WHERE recipe_id NOT IN UNNEST(@excluding_history_recipes_ids)

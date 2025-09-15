@@ -7,6 +7,7 @@ import bigframes.pandas as bpd
 from google.cloud import bigquery
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
+pd.set_option('display.max_colwidth', 100)
 
 os.environ['PROJECT_ID'] = 'kaggle-bigquery-471522'
 PROJECT_ID = os.environ['PROJECT_ID']
@@ -216,7 +217,9 @@ df_valid_users = df_valid_users[df_valid_users['user_id'].isin(final_users)].res
 print(df_train_users.describe())
 print(df_valid_users.describe())
 
-df_users_to_profile = df_valid_users.copy().drop_duplicates(['user_id'], keep='first')[['user_id']].reset_index(drop=True)  # , 'datelastmodified'
+df_users_to_profile = df_valid_users.groupby('user_id').agg({'recipe_id': 'unique'}).reset_index().rename(columns={
+    'recipe_id': 'rec_gt'
+})  # , 'datelastmodified'
 
 
 def get_user_history(user_id: int, n: int = 25) -> list:
@@ -292,7 +295,7 @@ class UserProfile(BaseModel):
     flavor_preferences: List[str] = Field(description="Dominant taste profiles and flavor characteristics the user seeks (e.g., bold and spicy, mild and creamy, tangy and citrusy)")
     daypart_preferences: List[str] = Field(description="Preferred times of day for different meal types based on rating patterns (e.g., hearty breakfast, light lunch, elaborate dinner)")
     lifestyle_tags: List[str] = Field(description="Behavioral patterns and cooking style indicators inferred from recipe choices (e.g., quick meals, entertainer, health-conscious, experimental cook)")
-    notes: str = Field(description="Brief summary explaining the users overall food personality and any notable patterns in their preferences")
+    notes: str = Field(description="Brief summary explaining the users overall food personality and any notable patterns in their preferences") # . Do not mention specific food names because this is a profile that summarizes the users food personality
     justification: str = Field(description="Detailed explanation of how the profile was determined based on the users interaction history and ratings. Describe why the liked cuisines, cuisine preference, dietary preference, food preferences, cuisine preferences, dietary preferences, flavor preferences, daypart preferences, and lifestyle tags were chosen. Is not allowed to use quotes or complex punctuation in this field. Keep it between 100 and 200 words not more.")
 
 
@@ -359,14 +362,74 @@ FROM (
 WHERE t.user_id = s.user_id
 """)
 
+# Parse column to exclude recipe_history from vector search
+df = client.query_and_wait(f"""
+SELECT * FROM `{PROJECT_ID}.{USERS_PARSED}`
+""").to_dataframe()
+
+df['recipes_to_exclude'] = df['user_history'].apply(lambda x: [entry['recipe_id'] for entry in x])
+
+# Update entire table with the new column
+df.to_gbq(
+    destination_table=f"{PROJECT_ID}.{USERS_PARSED}",
+    if_exists='replace',
+    # project_id=PROJECT_ID
+)
+
+# Add new column to user profiles table via left join
+client.query_and_wait(f"""
+CREATE OR REPLACE TABLE `{PROJECT_ID}.{USERS_PROFILES_TABLE}` AS
+SELECT u.*, p.recipes_to_exclude
+FROM `{PROJECT_ID}.{USERS_PROFILES_TABLE}` u
+LEFT JOIN `{PROJECT_ID}.{USERS_PARSED}` p USING(user_id)
+""")
+
 # -----------------------------------------------------------------------------
 # TODO: VECTOR SEARCH & EVAL
 # -----------------------------------------------------------------------------
 
 user_queries = client.query_and_wait(f"""
-SELECT user_id, text_embedding FROM `{PROJECT_ID}.{USERS_PROFILES_TABLE}`
+SELECT user_id, recipes_to_exclude, text_embedding FROM `{PROJECT_ID}.{USERS_PROFILES_TABLE}`
+""").to_dataframe()
+df_recipe_profiles = client.query_and_wait(f"""
+  SELECT recipe_id, text_embedding FROM `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}` LIMIT 2
 """).to_dataframe()
 
+TOP_K = 15
+query_vector_search = f"""
+SELECT * FROM
+VECTOR_SEARCH(
+    (
+        SELECT
+        title, recipe_id, recipe_profile_text, parsed_ingredients, parsed_recipe, text_embedding
+        FROM `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}`
+    ),
+    'text_embedding',
+    (
+        SELECT
+        text_embedding, n_history, user_id, rec_gt, recipes_to_exclude, user_profile_text
+        FROM `{PROJECT_ID}.{USERS_PROFILES_TABLE}`
+        LIMIT 2
+    ),
+    'text_embedding',
+    top_k => {TOP_K},
+    distance_type => 'EUCLIDEAN'
+)
+""" # DOT_PRODUCT, COSINE, EUCLIDEAN
+matches = client.query_and_wait(query_vector_search).to_dataframe()
+
+df_query = pd.json_normalize(matches["query"]).rename(columns={
+    'text_embedding': 'user_text_embedding',
+})
+df_base = pd.json_normalize(matches["base"]).rename(columns={
+    'text_embedding': 'recipe_text_embedding',
+})
+matches = pd.concat([matches.drop(["query","base"], axis=1), df_query, df_base], axis=1)
+matches
+
+# TABLE `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}`,
+# WHERE recipe_id NOT IN UNNEST(@excluding_history_recipes_ids)
+    # options => JSON '{{"fraction_lists_to_search": 0.01}}'
 
 # https://cloud.google.com/python/docs/reference/bigframes/latest
 # https://cloud.google.com/bigquery/docs/samples/bigquery-query#bigquery_query-python

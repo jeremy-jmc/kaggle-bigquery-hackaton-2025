@@ -12,6 +12,8 @@ from scipy import sparse
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import StandardScaler
 from dotenv import load_dotenv
+import subprocess
+import bigframes.pandas as bpd
 
 np.set_printoptions(suppress=True, precision=2)
 pd.set_option("display.float_format", "{:.3f}".format)
@@ -19,6 +21,16 @@ pd.set_option("display.float_format", "{:.3f}".format)
 load_dotenv()
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+
+os.environ['PROJECT_ID'] = 'kaggle-bigquery-471522'
+PROJECT_ID = os.environ['PROJECT_ID']
+
+subprocess.run(['gcloud', 'auth', 'login'])
+subprocess.run(['gcloud', 'config', 'set', 'project', PROJECT_ID])
+subprocess.run(['gcloud', 'auth', 'application-default', 'set-quota-project', PROJECT_ID])
+
+bpd.options.bigquery.project = PROJECT_ID
 
 random.seed(0)
 
@@ -84,7 +96,7 @@ display('val', core_val_rating.dtypes, core_val_rating.describe())
 # Sampling dataset -> ! Working only with `core_val_rating`
 # -----------------------------------------------------------------------------
 PREV_WEEKS = 48
-POST_WEEKS = 2
+POST_WEEKS = 8
 MIN_INTERACTIONS = 5
 MIN_INTERACTIONS_VAL = 3
 print(f"Using last {PREV_WEEKS} weeks of training data to predict next {POST_WEEKS} weeks of ratings")
@@ -104,6 +116,7 @@ core_val_rating = core_val_rating.loc[
 # Find common users and recipes first
 common_users = set(core_train_rating['user_id']).intersection(set(core_val_rating['user_id']))
 common_recipes = set(core_train_rating['recipe_id']).intersection(set(core_val_rating['recipe_id']))
+print(f"{len(common_users)=}, {len(common_recipes)=}")
 
 # Filter both datasets to only include common users and recipes
 train_users = core_train_rating[
@@ -115,6 +128,10 @@ val_users = core_val_rating[
     core_val_rating['recipe_id'].isin(common_recipes)
 ]
 
+common_users = set(train_users['user_id']).intersection(set(val_users['user_id']))
+common_recipes = set(train_users['recipe_id']).intersection(set(val_users['recipe_id']))
+print(f"{len(common_users)=}, {len(common_recipes)=}")
+
 # Now filter by minimum interactions AFTER filtering by common users/recipes
 train_user_counts = train_users['user_id'].value_counts()
 val_user_counts = val_users['user_id'].value_counts()
@@ -124,22 +141,14 @@ val_recipe_counts = val_users['recipe_id'].value_counts()
 # Users and recipes with at least MIN_INTERACTIONS interactions in FINAL filtered datasets
 users_min_it_train = set(train_user_counts[train_user_counts >= MIN_INTERACTIONS].index)
 users_min_it_val = set(val_user_counts[val_user_counts >= MIN_INTERACTIONS_VAL].index)
-recipes_min_it_train = set(train_recipe_counts[train_recipe_counts >= MIN_INTERACTIONS].index)
-recipes_min_it_val = set(val_recipe_counts[val_recipe_counts >= MIN_INTERACTIONS_VAL].index)
 
 # Final common users and recipes with minimum interactions
 final_users = users_min_it_train.intersection(users_min_it_val)
-final_recipes = recipes_min_it_train.intersection(recipes_min_it_val)
 
 # Apply final filter
-train_users = train_users[
-    train_users['user_id'].isin(final_users) & 
-    train_users['recipe_id'].isin(final_recipes)
-]
-val_users = val_users[
-    val_users['user_id'].isin(final_users) & 
-    val_users['recipe_id'].isin(final_recipes)
-]
+train_users = train_users[train_users['user_id'].isin(final_users)]
+val_users = val_users[(val_users['user_id'].isin(final_users))]
+final_recipes = set(train_users['recipe_id'].values).union(set(val_users['recipe_id'].values))
 
 # Apply rating modification
 train_users = modify_rating(train_users)
@@ -148,18 +157,16 @@ val_users = modify_rating(val_users)
 # Use final recipes for all recipe datasets
 train_recipes = val_recipes = recipes[recipes['recipe_id'].isin(final_recipes)]
 
-# Update common variables for later use
-common_users = final_users
-common_recipes = final_recipes
 
 print(f"Final datasets: {len(train_users)} train interactions, {len(val_users)} val interactions")
-print(f"Users: {len(common_users)}, Recipes: {len(common_recipes)}")
 
 # Verify minimum interactions constraint
 print(f"Min interactions per user in train: {train_users['user_id'].value_counts().min()}")
 print(f"Min interactions per user in val: {val_users['user_id'].value_counts().min()}")
 
-display(train_users['recipe_id'].value_counts().sort_values(ascending=False))
+display(train_users['user_id'].value_counts().sort_values(ascending=False))
+display(val_users['user_id'].value_counts().sort_values(ascending=False))
+print(f"Users: {len(final_users)}, Recipes: {len(final_recipes)}")
 
 
 # -----------------------------------------------------------------------------
@@ -202,7 +209,7 @@ data = weight_interactions(train_users)
 
 # Build sparse matrix: users x items
 train_matrix = coo_matrix((data, (rows, cols)), shape=(len(user_map), len(recipe_map)))
-print("User-Item Matrix:", train_matrix.shape)
+print("[TRAIN] User-Item Matrix:", train_matrix.shape)
 
 train_matrix = tfidf_weight(train_matrix.T).T
 train_matrix = bm25_weight(train_matrix.T).T
@@ -222,7 +229,7 @@ als_model.fit(train_matrix.T)
 
 
 def build_matrix(df, user_ids, recipe_ids, user_transform: bool = False):
-    # filter to known users and recipes
+    # * Filter to known users and recipes by the model (train set)
     df = df[df['user_id'].isin(user_ids.cat.categories) & df['recipe_id'].isin(recipe_ids.cat.categories)]
 
     rows = df['user_id'].astype('category').cat.set_categories(user_ids.cat.categories).cat.codes

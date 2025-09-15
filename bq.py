@@ -27,6 +27,9 @@ SUBSET_RECIPE_IDS = f"{PROJECT_ID}.{SCHEMA_NAME}.final_recipes"
 RECIPES_PARSED = f'{SCHEMA_NAME}.recipes_parsed'
 RECIPES_PROFILES_TABLE = f"{SCHEMA_NAME}.recipe_profiles"
 
+USERS_PARSED = f'{SCHEMA_NAME}.users_parsed'
+USERS_PROFILES_TABLE = f"{SCHEMA_NAME}.user_profiles"
+
 df = bpd.read_gbq(VALID_INTERACTIONS)
 
 client = bigquery.Client()
@@ -194,49 +197,35 @@ FROM (
 WHERE t.recipe_id = s.recipe_id
 """)
 
-# -----------------------------------------------------------------------------
-# TODO: VECTOR SEARCH & EVAL
-# -----------------------------------------------------------------------------
-
-df_recipes_profiles_to_vs = bpd.read_gbq(f"""SELECT * FROM `{RECIPES_PROFILES_TABLE}`""")
-
-
 # * USERS
 # -----------------------------------------------------------------------------
-# ...
+# PARSING: Generate new parsed columns for users during the selected time window into a new table called `users_parsed`
 # -----------------------------------------------------------------------------
 
-class UserProfile(BaseModel):
-    liked_cuisines: List[str] = Field(description="List of cuisines the user enjoys most, ranked by preference based on their interaction history and ratings")
-    cuisine_preference: str = Field(description="Primary cuisine type the user gravitates towards (e.g., 'Mediterranean', 'Asian Fusion', 'Traditional American')")
-    dietary_preference: str = Field(description="Main dietary restriction or lifestyle the user follows (e.g., 'Vegetarian', 'Low-carb', 'No restrictions')")
-
-    food_preferences: List[str] = Field(description="Preferred food categories and meal types (e.g., 'comfort food', 'healthy salads', 'baked goods', 'grilled meats')")
-    cuisine_preferences: List[str] = Field(description="Specific regional or ethnic cuisines the user frequently rates highly (e.g., 'Thai', 'Southern BBQ', 'French pastry')")
-    dietary_preferences: List[str] = Field(description="Dietary restrictions, health considerations, or eating patterns (e.g., 'gluten-free', 'plant-based', 'high-protein', 'dairy-free')")
-    flavor_preferences: List[str] = Field(description="Dominant taste profiles and flavor characteristics the user seeks (e.g., 'bold and spicy', 'mild and creamy', 'tangy and citrusy')")
-    daypart_preferences: List[str] = Field(description="Preferred times of day for different meal types based on rating patterns (e.g., 'hearty breakfast', 'light lunch', 'elaborate dinner')")
-    lifestyle_tags: List[str] = Field(description="Behavioral patterns and cooking style indicators inferred from recipe choices (e.g., 'quick meals', 'entertainer', 'health-conscious', 'experimental cook')")
-    notes: str = Field(description="Brief summary explaining the user's overall food personality and any notable patterns in their preferences")
-    justification: str = Field(description="Detailed explanation of how the profile was determined based on the user's interaction history and ratings. Describe why the liked cuisines, cuisine preference, dietary preference, food preferences, cuisine preferences, dietary preferences, flavor preferences, daypart preferences, and lifestyle tags were chosen. Is not allowed to use quotes or complex punctuation in this field.")
-
-
+df_recipe_profiles = client.query_and_wait(f"""SELECT * EXCEPT(text_embedding) FROM `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}`""").to_dataframe()
 subset_cols = 'user_id, recipe_id, rating, datelastmodified'
 df_train_users = client.query_and_wait(f"""SELECT {subset_cols} FROM `{TRAIN_INTERACTIONS}`""").to_dataframe()
 df_valid_users = client.query_and_wait(f"""SELECT {subset_cols} FROM `{VALID_INTERACTIONS}`""").to_dataframe()
 
+# Drop users in valid not present in train_set
+final_users = set(df_train_users['user_id'].unique()).intersection(set(df_valid_users['user_id'].unique()))
+print(f"Final users: {len(final_users)}")
+df_train_users = df_train_users[df_train_users['user_id'].isin(final_users)].reset_index(drop=True)
+df_valid_users = df_valid_users[df_valid_users['user_id'].isin(final_users)].reset_index(drop=True)
+
 print(df_train_users.describe())
 print(df_valid_users.describe())
 
-df_users_to_profile = df_valid_users.copy().drop_duplicates(['user_id'], keep='first')[['user_id', 'datelastmodified']].reset_index(drop=True)
+df_users_to_profile = df_valid_users.copy().drop_duplicates(['user_id'], keep='first')[['user_id']].reset_index(drop=True)  # , 'datelastmodified'
 
 
 def get_user_history(user_id: int, n: int = 25) -> list:
     """Get the top-n most recent recipes the user has interacted with."""
     user_history = df_train_users[df_train_users['user_id'] == user_id]
     user_history = user_history.sort_values(by='datelastmodified', ascending=False).head(n)
-    
-    return user_history[['recipe_id', 'rating']].to_dict('records')
+    user_history['date'] = user_history['datelastmodified'].dt.strftime('%Y-%m-%d')
+
+    return user_history[['recipe_id', 'rating', 'date']].to_dict('records')
 
     # recipe_ids = user_history['recipe_id'].unique().tolist()
     # return recipe_ids
@@ -245,10 +234,138 @@ def get_user_history(user_id: int, n: int = 25) -> list:
     # titles = recipes['title'].tolist()
     # return "\n".join([f"- {t}" for t in titles])
 
+
+def format_user_history(user_history: list[dict]) -> str:
+    """Format the user history as a bulleted list."""
+
+    user_info = ""
+    avg_rating = 0
+    for entry in user_history:
+        recipe_metadata = df_recipe_profiles.loc[lambda df: df['recipe_id'] == entry['recipe_id'], ['recipe_id', 'title', 'parsed_ingredients', 'parsed_recipe', 'recipe_profile_text']].reset_index(drop=True).iloc[0]
+        avg_rating += entry['rating']
+
+        user_info += (
+            f"\n>>> Recipe Title: {recipe_metadata['title']}\n"
+            f">>> User Rating: {entry['rating']}\n"
+            f">>> Date of Interaction: {entry['date']}\n"
+            # TODO: Faltan estas columnas
+            # f"User Comment: {row['text']}\n"
+            # f"Recipe Average Rating: {row['aver_rate']}\n"
+            f">>> Ingredients:\n{recipe_metadata['parsed_ingredients']}\n"
+            f">>> Cooking Directions:\n{recipe_metadata['parsed_recipe']}\n"
+        )
+        user_info += "--------------------------------------------\n"
+    avg_rating /= len(user_history)
+    user_info = f"The user has rated {len(user_history)} recipes, with an average rating of {avg_rating:.2f}.\n{user_info}"
+    user_info = "########################################### USER HISTORY START ###########################################\n" + user_info
+    user_info += "########################################### USER HISTORY END ###########################################\n"
+    
+    return user_info
+
+
 df_users_to_profile['user_history'] = df_users_to_profile['user_id'].apply(get_user_history)
+df_users_to_profile['n_history'] = df_users_to_profile['user_history'].apply(len)
+
+df_users_to_profile['n_history'].plot.hist(bins=30)
+
+# print(format_user_history(df_users_to_profile['user_history'].iloc[0]))
+df_users_to_profile['history_string'] = df_users_to_profile['user_history'].apply(format_user_history)
+
+bpd.DataFrame(df_users_to_profile).to_gbq(
+    destination_table=f"{PROJECT_ID}.{USERS_PARSED}",
+    if_exists='replace',
+    # project_id=PROJECT_ID
+)
+
+# -----------------------------------------------------------------------------
+# TEXT + EMBEDDING GENERATION: User Profiles
+# -----------------------------------------------------------------------------
+
+class UserProfile(BaseModel):
+    liked_cuisines: List[str] = Field(description="List of cuisines the user enjoys most, ranked by preference based on their interaction history and ratings")
+    cuisine_preference: str = Field(description="Primary cuisine type the user gravitates towards (e.g., Mediterranean, Asian Fusion, Traditional American)")
+    dietary_preference: str = Field(description="Main dietary restriction or lifestyle the user follows (e.g., Vegetarian, Low-carb, No restrictions)")
+
+    food_preferences: List[str] = Field(description="Preferred food categories and meal types (e.g., comfort food, healthy salads, baked goods, grilled meats)")
+    cuisine_preferences: List[str] = Field(description="Specific regional or ethnic cuisines the user frequently rates highly (e.g., Thai, Southern BBQ, French pastry)")
+    dietary_preferences: List[str] = Field(description="Dietary restrictions, health considerations, or eating patterns (e.g., gluten-free, plant-based, high-protein, dairy-free)")
+    flavor_preferences: List[str] = Field(description="Dominant taste profiles and flavor characteristics the user seeks (e.g., bold and spicy, mild and creamy, tangy and citrusy)")
+    daypart_preferences: List[str] = Field(description="Preferred times of day for different meal types based on rating patterns (e.g., hearty breakfast, light lunch, elaborate dinner)")
+    lifestyle_tags: List[str] = Field(description="Behavioral patterns and cooking style indicators inferred from recipe choices (e.g., quick meals, entertainer, health-conscious, experimental cook)")
+    notes: str = Field(description="Brief summary explaining the users overall food personality and any notable patterns in their preferences")
+    justification: str = Field(description="Detailed explanation of how the profile was determined based on the users interaction history and ratings. Describe why the liked cuisines, cuisine preference, dietary preference, food preferences, cuisine preferences, dietary preferences, flavor preferences, daypart preferences, and lifestyle tags were chosen. Is not allowed to use quotes or complex punctuation in this field. Keep it between 100 and 200 words not more.")
 
 
-user_profile_prompt = f"""You are a user profile expert specializing in analyzing user preferences based on their recipe interactions. Your task is to generate a structured user profile that captures their culinary tastes, dietary preferences, flavor inclinations, among others. Ensure the profile is concise and accurately reflects the user's food personality based on their interaction history. Please provide a structured profile of the user using the following format: {schema_to_prompt_with_descriptions(UserProfile)}. IMPORTANT: Do not use quotation marks or complex punctuation in your response. Use simple words and avoid any quotes, apostrophes, or special characters. Use the following interaction history as reference:"""
+user_profile_prompt = f"""Generate a structured user profile that captures their culinary tastes, dietary preferences, flavor inclinations, among others. Ensure the profile is concise, reasonable and accurately reflects the users food personality based on their interaction history. Please provide a structured profile of the user using the following format: {schema_to_prompt_with_descriptions(UserProfile)}. Each fill of the structured output doesnt need to take more than 200 words keep it in mind. IMPORTANT: Do not use quotation marks or complex punctuation in your response. Use simple words and avoid any quotes, apostrophes, or special characters. Use the following interaction history as reference:"""
+
+user_profile_generation_query = f"""
+WITH ai_responses AS (
+  SELECT 
+    s.user_id, 
+    s.n_history,
+    s.history_string,
+    AI.GENERATE(('{user_profile_prompt}', s.history_string),
+        connection_id => '{CONNECTION_ID}',
+        endpoint => 'gemini-2.5-flash',
+        model_params => JSON '{{"generationConfig":{{"temperature": 1.0, "maxOutputTokens": 4096, "thinking_config": {{"thinking_budget": 1024}} }} }}',
+        output_schema => 'liked_cuisines ARRAY<STRING>, cuisine_preference STRING, dietary_preference STRING, food_preferences ARRAY<STRING>, cuisine_preferences ARRAY<STRING>, dietary_preferences ARRAY<STRING>, flavor_preferences ARRAY<STRING>, daypart_preferences ARRAY<STRING>, lifestyle_tags ARRAY<STRING>, notes STRING, justification STRING'
+    ) AS ai_result
+  FROM (SELECT * FROM `{USERS_PARSED}`) s
+)
+SELECT 
+  *,
+  ai_result.full_response AS user_profile,
+  JSON_EXTRACT_SCALAR(ai_result.full_response, '$.candidates[0].content.parts[0].text') AS user_profile_text
+FROM ai_responses
+"""         #   LIMIT 2
+
+print(user_profile_generation_query)
+user_rows = client.query_and_wait(user_profile_generation_query)
+df_users_profiles = user_rows.to_dataframe()
+
+print(json.dumps(json.loads(df_users_profiles['user_profile_text'].iloc[0]), indent=2))
+
+df_users_profiles.to_gbq(
+    destination_table=f"{PROJECT_ID}.{USERS_PROFILES_TABLE}",
+    if_exists='replace',
+    # project_id=PROJECT_ID
+)
+
+client.query_and_wait(f"""
+ALTER TABLE `{PROJECT_ID}.{USERS_PROFILES_TABLE}`
+ADD COLUMN text_embedding ARRAY<FLOAT64>
+""")
+
+# Create Vector Embeddings for the user profiles
+client.query_and_wait(f"""
+UPDATE `{PROJECT_ID}.{USERS_PROFILES_TABLE}` AS t
+SET t.text_embedding = s.ml_generate_embedding_result
+FROM (
+  SELECT
+    user_id,
+    ml_generate_embedding_result
+  FROM
+    ML.GENERATE_EMBEDDING(
+      MODEL `{SCHEMA_NAME}.text_embedding_model`,
+      (
+        SELECT
+          user_id,
+          user_profile_text AS content
+        FROM `{PROJECT_ID}.{USERS_PROFILES_TABLE}`
+      ),
+      STRUCT(TRUE AS flatten_json_output)
+    )
+) AS s
+WHERE t.user_id = s.user_id
+""")
+
+# -----------------------------------------------------------------------------
+# TODO: VECTOR SEARCH & EVAL
+# -----------------------------------------------------------------------------
+
+user_queries = client.query_and_wait(f"""
+SELECT user_id, text_embedding FROM `{PROJECT_ID}.{USERS_PROFILES_TABLE}`
+""").to_dataframe()
 
 
 # https://cloud.google.com/python/docs/reference/bigframes/latest

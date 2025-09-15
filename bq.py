@@ -7,6 +7,8 @@ import bigframes.pandas as bpd
 from google.cloud import bigquery
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
+from dotenv import load_dotenv
+load_dotenv()
 pd.set_option('display.max_colwidth', 100)
 
 os.environ['PROJECT_ID'] = 'kaggle-bigquery-471522'
@@ -395,7 +397,7 @@ df_recipe_profiles = client.query_and_wait(f"""
   SELECT recipe_id, text_embedding FROM `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}` LIMIT 2
 """).to_dataframe()
 
-TOP_K = 15
+TOP_K = 50
 query_vector_search = f"""
 SELECT * FROM
 VECTOR_SEARCH(
@@ -409,13 +411,12 @@ VECTOR_SEARCH(
         SELECT
         text_embedding, n_history, user_id, rec_gt, recipes_to_exclude, user_profile_text
         FROM `{PROJECT_ID}.{USERS_PROFILES_TABLE}`
-        LIMIT 2
     ),
     'text_embedding',
     top_k => {TOP_K},
     distance_type => 'EUCLIDEAN'
 )
-""" # DOT_PRODUCT, COSINE, EUCLIDEAN
+""" # DOT_PRODUCT, COSINE, EUCLIDEAN / LIMIT 2
 matches = client.query_and_wait(query_vector_search).to_dataframe()
 
 df_query = pd.json_normalize(matches["query"]).rename(columns={
@@ -425,7 +426,24 @@ df_base = pd.json_normalize(matches["base"]).rename(columns={
     'text_embedding': 'recipe_text_embedding',
 })
 matches = pd.concat([matches.drop(["query","base"], axis=1), df_query, df_base], axis=1)
-matches
+
+# Calculate Hit Rate @ K
+hit_rate_table = matches.groupby('user_id', as_index=False).agg({
+    'rec_gt': 'first', 
+    'recipe_id': list,
+    'recipe_profile_text': list,
+    'title': list,
+    'user_profile_text': 'first',   # or unique
+})
+hit_rate_table['hit'] = hit_rate_table.apply(lambda row: any(r in row['rec_gt'] for r in row['recipe_id']), axis=1)
+hit_rate_table['hit_count'] = hit_rate_table.apply(lambda row: sum(1 for r in row['rec_gt'] if r in row['recipe_id']), axis=1)
+hit_rate_table['hit_proportion'] = hit_rate_table['hit_count'] / hit_rate_table['rec_gt'].apply(len)
+
+avg_hit_prop = hit_rate_table['hit_proportion'].mean()
+hit_rate_table['hit_proportion'].plot(kind='hist', bins=20, title=f'Hit Proportion @ {TOP_K} => {avg_hit_prop:.2f}')
+print(f"{avg_hit_prop=:.2f}")       # 0.28 until now
+
+hit_rate_table.loc[lambda df: df['hit_proportion'] == 0]
 
 # TABLE `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}`,
 # WHERE recipe_id NOT IN UNNEST(@excluding_history_recipes_ids)

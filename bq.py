@@ -104,8 +104,37 @@ LEFT JOIN `{RECIPES_ALL}` USING(recipe_id)
 
 # Convert to pandas DataFrame to use custom functions, then back to BigFrames
 df_recipes_pandas = df_recipes.to_pandas()
+
+nutrition_values = []
+for idx, row in tqdm(df_recipes_pandas.iterrows(), total=len(df_recipes_pandas)):
+    nutritions_dict = ast.literal_eval(row['nutritions'])
+    
+    row_info = {'recipe_id': row['recipe_id']}
+    nutritions_info = {}
+    for k in ['niacin', 'sugars', 'sodium', 'carbohydrates', 'vitaminB6', 'calories', 'thiamin', 'fat', 'folate', 'caloriesFromFat', 'calcium', 'fiber', 'magnesium', 'iron', 'cholesterol', 'protein', 'vitaminA', 'potassium', 'saturatedFat', 'vitaminC']:
+        if k in nutritions_dict:
+            nutritions_info[k] = nutritions_dict[k].get('percentDailyValue', -1)
+            if nutritions_info[k] is not None:
+                v = str(nutritions_info[k]).strip()
+                if v == '< 1':
+                    nutritions_info[k] = 0.0
+                # if v == '-':
+                #     nutritions_info[k] = -1
+                
+                try:
+                    nutritions_info[k] = f"{nutritions_info[k]} percent"
+                except Exception:
+                    # nutritions_info[k] = "-1 %"
+                    pass
+    
+    row_info['percent_daily_values'] = "\n".join([f"{k}: {v}" for k, v in nutritions_info.items()])
+    nutrition_values.append(row_info)
+
+nutrition_df = pd.DataFrame(nutrition_values).fillna(-2)
+
 df_recipes_pandas['parsed_ingredients'] = df_recipes_pandas['ingredients'].apply(prep_ingredients)
 df_recipes_pandas['parsed_recipe'] = df_recipes_pandas['cooking_directions'].apply(prep_directions)
+df_recipes_pandas = df_recipes_pandas.merge(nutrition_df, how='left', on='recipe_id')
 df_recipes = bpd.DataFrame(df_recipes_pandas)
 
 # Upload the new table in BigQuery
@@ -126,18 +155,22 @@ class RecipeProfile(BaseModel):
     dietary_preferences: List[str] = Field(description="Dietary preferences, e.g., vegetarian, vegan, gluten-free")
     flavor_profile: List[str] = Field(description="Flavor profile, e.g., spicy, sweet, savory")
     serving_daypart: List[str] = Field(description="Suitable dayparts, e.g., breakfast, lunch, dinner")
-    # TODO: add these fields later
-    # cooking_method: str = Field(description="Main preparation method (e.g., grilled, baked, stir-fried, raw)")
-    # complexity: str = Field(description="Estimated skill or effort required (e.g., easy, intermediate, advanced)")
-    # # nutritional_tags: List[str] = Field(description="Health or nutrition tags (e.g., high-protein, low-carb, low-calorie)")
-    # # occasion_tags: List[str] = Field(description="Occasions this recipe suits (e.g., everyday meal, party dish, festive special)")
-    # ingredient_anchors: List[str] = Field(description="General ingredient families central to the recipe (e.g., poultry, legumes, seafood, grains, leafy greens)")
     
-    notes: str = Field(description="Short rationale for the profile")
+    cooking_method: str = Field(description="Main preparation method (e.g., grilled, baked, stir-fried, raw)")
+    complexity: str = Field(description="Estimated skill or effort required (e.g., easy, intermediate, advanced)")
+    ingredient_anchors: List[str] = Field(description="General ingredient families central to the recipe (e.g., poultry, legumes, seafood, grains, leafy greens)")
+    nutritional_tags: List[str] = Field(description="Health or nutrition tags (e.g., high-protein, low-carb, low-calorie)")
+    occasion_tags: List[str] = Field(description="Occasions this recipe suits (e.g., everyday meal, party dish, festive special)")
+    cooking_time_category: str = Field(description="Qualitative cooking time category inferred from directions, e.g., quick, moderate, long")
+    equipment_needed: List[str] = Field(description="Key kitchen tools inferred from directions, e.g., oven, blender, slow cooker")
+    allergen_risks: List[str] = Field(description="Possible allergens present in the recipe, e.g., nuts, dairy, shellfish, gluten")
+    sensory_descriptors: List[str] = Field(description="Textural or sensory aspects, e.g., crispy, creamy, hearty, light")
+
+    notes: str = Field(description="Short rationale summarizing the recipe profile")
     justification: str = Field(description="Detailed explanation of how the profile was determined Describe why the food type, cuisine type, dietary preferences, flavor profile, and serving daypart were chosen based on the ingredients and cooking directions. Is not allowed to use quotes or complex punctuation in this field.")
 
 
-recipe_profile_prompt = f"""Based on the title, ingredients, and cooking directions provided, create a recipe profile that summarizes the key characteristics of this recipe. Your response must follow this exact structure: {schema_to_prompt_with_descriptions(RecipeProfile)}. IMPORTANT: Do not use quotation marks or complex punctuation in your response. Use simple words and avoid any quotes, apostrophes, or special characters."""
+recipe_profile_prompt = f"""Based on the title, ingredients, cooking directions and percent daily values provided, create a recipe profile that summarizes the key characteristics of this recipe. Your response must follow this exact structure: {schema_to_prompt_with_descriptions(RecipeProfile)}. IMPORTANT: Do not use quotation marks or complex punctuation in your response. Use simple words and avoid any quotes, apostrophes, or special characters."""
 
 recipe_profile_generation_query = f"""
 WITH ai_responses AS (
@@ -150,11 +183,11 @@ WITH ai_responses AS (
     s.reviews, 
     s.parsed_ingredients, 
     s.parsed_recipe,
-    AI.GENERATE(('{recipe_profile_prompt}', s.parsed_ingredients, s.parsed_recipe),
+    AI.GENERATE(('{recipe_profile_prompt}', s.parsed_ingredients, s.parsed_recipe, s.percent_daily_values),
         connection_id => '{CONNECTION_ID}',
         endpoint => 'gemini-2.5-pro',
         model_params => JSON '{{"generationConfig":{{"temperature": 0.0, "maxOutputTokens": 2048, "thinking_config": {{"thinking_budget": 1024}} }} }}',
-        output_schema => 'food_type STRING, cuisine_type STRING, dietary_preferences ARRAY<STRING>, flavor_profile ARRAY<STRING>, serving_daypart ARRAY<STRING>, notes STRING, justification STRING'
+        output_schema => 'food_type STRING, cuisine_type STRING, dietary_preferences ARRAY<STRING>, flavor_profile ARRAY<STRING>, serving_daypart ARRAY<STRING>, cooking_method STRING, complexity STRING, ingredient_anchors STRING, nutritional_tags STRING, occasion_tags STRING, cooking_time_category STRING, equipment_needed STRING, allergen_risks STRING, sensory_descriptors STRING, notes STRING, justification STRING'
     ) AS ai_result
   FROM (SELECT * FROM `{RECIPES_PARSED}`) s
 )
@@ -327,14 +360,16 @@ class UserProfile(BaseModel):
     flavor_preferences: List[str] = Field(description="Dominant taste profiles and flavor characteristics the user seeks (e.g., bold and spicy, mild and creamy, tangy and citrusy)")
     daypart_preferences: List[str] = Field(description="Preferred times of day for different meal types based on rating patterns (e.g., hearty breakfast, light lunch, elaborate dinner)")
     lifestyle_tags: List[str] = Field(description="Behavioral patterns and cooking style indicators inferred from recipe choices (e.g., quick meals, entertainer, health-conscious, experimental cook)")
+    adventurousness_level: str = Field(description="Exploration tendency, e.g., experimental, conservative eater")
     convenience_preference: str = Field(description="Preference for recipe complexity (e.g., quick and easy, gourmet elaborate)")
     diversity_openness: str = Field(description="Willingness to try new cuisines (e.g., adventurous, selective, traditionalist, not defined)")
 
     notes: str = Field(description="Brief summary explaining the users overall food personality and any notable patterns in their preferences") # . Do not mention specific food names because this is a profile that summarizes the users food personality
     justification: str = Field(description="Detailed explanation of how the profile was determined based on the users interaction history and ratings. Describe why the liked cuisines, cuisine preference, dietary preference, food preferences, cuisine preferences, dietary preferences, flavor preferences, daypart preferences, and lifestyle tags were chosen. Is not allowed to use quotes or complex punctuation in this field. Keep it between 100 and 200 words not more.")
+    user_story: str = Field(description="Narrative storytelling of the user s food journey and preferences in natural language. Written as if describing the user to a friend, capturing their personality, habits, and flavor of choices.")
 
 
-user_profile_prompt = f"""Generate a structured user profile that captures their culinary tastes, dietary preferences, flavor inclinations, among others. Ensure the profile is concise, reasonable and accurately reflects the users food personality based on their interaction history. Please provide a structured profile of the user using the following format: {schema_to_prompt_with_descriptions(UserProfile)}. Each fill of the structured output doesnt need to take more than 200 words keep it in mind. IMPORTANT: Do not use quotation marks or complex punctuation in your response. Use simple words and avoid any quotes, apostrophes, or special characters. Use the following interaction history as reference:"""
+user_profile_prompt = f"""Generate a structured user profile that captures their culinary tastes, dietary preferences, flavor inclinations, among others. This user profile will be used then for a Recommendation System. Ensure the profile is concise, reasonable and accurately reflects the users food personality based on their interaction history. Please provide a structured profile of the user using the following format: {schema_to_prompt_with_descriptions(UserProfile)}. Each fill of the structured output doesnt need to take more than 200 words keep it in mind. IMPORTANT: Do not use quotation marks or complex punctuation in your response. Use simple words and avoid any quotes, apostrophes, or special characters. Use the following interaction history as reference:"""
 
 user_profile_generation_query = f"""
 WITH ai_responses AS (
@@ -345,8 +380,8 @@ WITH ai_responses AS (
     AI.GENERATE(('{user_profile_prompt}', s.history_string),
         connection_id => '{CONNECTION_ID}',
         endpoint => 'gemini-2.5-flash',
-        model_params => JSON '{{"generationConfig":{{"temperature": 1.0, "maxOutputTokens": 4096, "thinking_config": {{"thinking_budget": 1024}} }} }}',
-        output_schema => 'liked_cuisines ARRAY<STRING>, cuisine_preference STRING, dietary_preference STRING, food_preferences ARRAY<STRING>, cuisine_preferences ARRAY<STRING>, dietary_preferences ARRAY<STRING>, flavor_preferences ARRAY<STRING>, daypart_preferences ARRAY<STRING>, lifestyle_tags ARRAY<STRING>, notes STRING, justification STRING'
+        model_params => JSON '{{"generationConfig":{{"temperature": 1.0, "maxOutputTokens": 2048, "thinking_config": {{"thinking_budget": 1024}} }} }}',
+        output_schema => 'liked_cuisines ARRAY<STRING>, cuisine_preference STRING, dietary_preference STRING, food_preferences ARRAY<STRING>, cuisine_preferences ARRAY<STRING>, dietary_preferences ARRAY<STRING>, flavor_preferences ARRAY<STRING>, daypart_preferences ARRAY<STRING>, lifestyle_tags ARRAY<STRING>, adventurousness_level STRING, convenience_preference STRING, diversity_openness STRING, notes STRING, justification STRING, user_story STRING'
     ) AS ai_result
   FROM (SELECT * FROM `{USERS_PARSED}`) s
 )
@@ -414,7 +449,7 @@ df.to_gbq(
 # Add new column to user profiles table via left join
 client.query_and_wait(f"""
 CREATE OR REPLACE TABLE `{PROJECT_ID}.{USERS_PROFILES_TABLE}` AS
-SELECT u.*, p.recipes_to_exclude
+SELECT u.*, p.recipes_to_exclude, p.rec_gt
 FROM `{PROJECT_ID}.{USERS_PROFILES_TABLE}` u
 LEFT JOIN `{PROJECT_ID}.{USERS_PARSED}` p USING(user_id)
 """)

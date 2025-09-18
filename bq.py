@@ -10,6 +10,7 @@ from typing import List, Dict, Optional
 from tqdm import tqdm
 from dotenv import load_dotenv
 from IPython.display import display
+import matplotlib.pyplot as plt
 load_dotenv()
 pd.set_option('display.max_colwidth', 100)
 
@@ -156,22 +157,24 @@ class RecipeProfile(BaseModel):
     flavor_profile: List[str] = Field(description="Flavor profile, e.g., spicy, sweet, savory")
     serving_daypart: List[str] = Field(description="Suitable dayparts, e.g., breakfast, lunch, dinner")
     
-    cooking_method: str = Field(description="Main preparation method (e.g., grilled, baked, stir-fried, raw)")
-    complexity: str = Field(description="Estimated skill or effort required (e.g., easy, intermediate, advanced)")
-    ingredient_anchors: List[str] = Field(description="General ingredient families central to the recipe (e.g., poultry, legumes, seafood, grains, leafy greens)")
-    nutritional_tags: List[str] = Field(description="Health or nutrition tags (e.g., high-protein, low-carb, low-calorie)")
-    occasion_tags: List[str] = Field(description="Occasions this recipe suits (e.g., everyday meal, party dish, festive special)")
-    cooking_time_category: str = Field(description="Qualitative cooking time category inferred from directions, e.g., quick, moderate, long")
-    equipment_needed: List[str] = Field(description="Key kitchen tools inferred from directions, e.g., oven, blender, slow cooker")
-    allergen_risks: List[str] = Field(description="Possible allergens present in the recipe, e.g., nuts, dairy, shellfish, gluten")
-    sensory_descriptors: List[str] = Field(description="Textural or sensory aspects, e.g., crispy, creamy, hearty, light")
+    # cooking_method: str = Field(description="Main preparation method (e.g., grilled, baked, stir-fried, raw)")
+    # complexity: str = Field(description="Estimated skill or effort required (e.g., easy, intermediate, advanced)")
+    # ingredient_anchors: List[str] = Field(description="General ingredient families central to the recipe (e.g., poultry, legumes, seafood, grains, leafy greens)")
+    # nutritional_tags: List[str] = Field(description="Health or nutrition tags (e.g., high-protein, low-carb, low-calorie)")
+    # occasion_tags: List[str] = Field(description="Occasions this recipe suits (e.g., everyday meal, party dish, festive special)")
+    # cooking_time_category: str = Field(description="Qualitative cooking time category inferred from directions, e.g., quick, moderate, long")
+    # equipment_needed: List[str] = Field(description="Key kitchen tools inferred from directions, e.g., oven, blender, slow cooker")
+    # allergen_risks: List[str] = Field(description="Possible allergens present in the recipe, e.g., nuts, dairy, shellfish, gluten")
+    # sensory_descriptors: List[str] = Field(description="Textural or sensory aspects, e.g., crispy, creamy, hearty, light")
 
     notes: str = Field(description="Short rationale summarizing the recipe profile")
+    target_audience: str = Field(description="Types of users who would likely enjoy this recipe based on cooking skill level, flavor intensity, dietary needs, and lifestyle preferences. Helps recommendation systems match recipes to appropriate user profiles.")
     justification: str = Field(description="Detailed explanation of how the profile was determined Describe why the food type, cuisine type, dietary preferences, flavor profile, and serving daypart were chosen based on the ingredients and cooking directions. Is not allowed to use quotes or complex punctuation in this field.")
 
 
 recipe_profile_prompt = f"""Based on the title, ingredients, cooking directions and percent daily values provided, create a recipe profile that summarizes the key characteristics of this recipe. Your response must follow this exact structure: {schema_to_prompt_with_descriptions(RecipeProfile)}. IMPORTANT: Do not use quotation marks or complex punctuation in your response. Use simple words and avoid any quotes, apostrophes, or special characters."""
 
+# cooking_method STRING, complexity STRING, ingredient_anchors STRING, nutritional_tags STRING, occasion_tags STRING, cooking_time_category STRING, equipment_needed STRING, allergen_risks STRING, sensory_descriptors STRING
 recipe_profile_generation_query = f"""
 WITH ai_responses AS (
   SELECT 
@@ -185,9 +188,9 @@ WITH ai_responses AS (
     s.parsed_recipe,
     AI.GENERATE(('{recipe_profile_prompt}', s.parsed_ingredients, s.parsed_recipe, s.percent_daily_values),
         connection_id => '{CONNECTION_ID}',
-        endpoint => 'gemini-2.5-pro',
-        model_params => JSON '{{"generationConfig":{{"temperature": 0.0, "maxOutputTokens": 2048, "thinking_config": {{"thinking_budget": 1024}} }} }}',
-        output_schema => 'food_type STRING, cuisine_type STRING, dietary_preferences ARRAY<STRING>, flavor_profile ARRAY<STRING>, serving_daypart ARRAY<STRING>, cooking_method STRING, complexity STRING, ingredient_anchors STRING, nutritional_tags STRING, occasion_tags STRING, cooking_time_category STRING, equipment_needed STRING, allergen_risks STRING, sensory_descriptors STRING, notes STRING, justification STRING'
+        endpoint => 'gemini-2.5-flash',
+        model_params => JSON '{{"generationConfig":{{"temperature": 1.0, "maxOutputTokens": 2048, "thinking_config": {{"thinking_budget": 1024}} }} }}',
+        output_schema => 'food_type STRING, cuisine_type STRING, dietary_preferences ARRAY<STRING>, flavor_profile ARRAY<STRING>, serving_daypart ARRAY<STRING>, notes STRING, target_audience STRING, justification STRING'
     ) AS ai_result
   FROM (SELECT * FROM `{RECIPES_PARSED}`) s
 )
@@ -272,11 +275,15 @@ df_valid_users = client.query_and_wait(f"""SELECT {subset_cols} FROM `{VALID_INT
 # Drop users in valid not present in train_set
 final_users = set(df_train_users['user_id'].unique()).intersection(set(df_valid_users['user_id'].unique()))
 print(f"Final users: {len(final_users)}")
+
 df_train_users = df_train_users[df_train_users['user_id'].isin(final_users)].reset_index(drop=True)
 df_train_users['datelastmodified'] = pd.to_datetime(df_train_users['datelastmodified'])
 df_train_users = df_train_users.merge(
-    reviews_df[['user_id', 'recipe_id', 'datelastmodified', 'text']], how='left', on=['user_id', 'recipe_id', 'datelastmodified']
+    reviews_df[['user_id', 'recipe_id', 'datelastmodified', 'text']], how='left', 
+    on=['user_id', 'recipe_id', 'datelastmodified'],
+    validate='one_to_one'
 ).rename(columns={'text': 'user_comment'})
+
 df_valid_users = df_valid_users[df_valid_users['user_id'].isin(final_users)].reset_index(drop=True)
 
 print(df_train_users.describe())
@@ -287,10 +294,11 @@ df_users_to_profile = df_valid_users.groupby('user_id').agg({'recipe_id': 'uniqu
 })  # , 'datelastmodified'
 
 
-def get_user_history(user_id: int, n: int = 25) -> list:
+def get_user_history(user_id: int, n: int = 25, k_min: int = 5) -> list:
     """Get the top-n most recent recipes the user has interacted with."""
     user_history = df_train_users[df_train_users['user_id'] == user_id]
     user_history = user_history.sort_values(by='datelastmodified', ascending=False).head(n)
+    # TODO: assert len(user_history) > k_min, f"User {user_id} has less than {k_min} interactions"
     user_history['date'] = user_history['datelastmodified'].dt.strftime('%Y-%m-%d')
 
     return user_history[['recipe_id', 'rating', 'date', 'user_comment']].to_dict('records')
@@ -360,17 +368,18 @@ class UserProfile(BaseModel):
     flavor_preferences: List[str] = Field(description="Dominant taste profiles and flavor characteristics the user seeks (e.g., bold and spicy, mild and creamy, tangy and citrusy)")
     daypart_preferences: List[str] = Field(description="Preferred times of day for different meal types based on rating patterns (e.g., hearty breakfast, light lunch, elaborate dinner)")
     lifestyle_tags: List[str] = Field(description="Behavioral patterns and cooking style indicators inferred from recipe choices (e.g., quick meals, entertainer, health-conscious, experimental cook)")
-    adventurousness_level: str = Field(description="Exploration tendency, e.g., experimental, conservative eater")
+    # adventurousness_level: str = Field(description="Exploration tendency, e.g., experimental, conservative eater")
     convenience_preference: str = Field(description="Preference for recipe complexity (e.g., quick and easy, gourmet elaborate)")
     diversity_openness: str = Field(description="Willingness to try new cuisines (e.g., adventurous, selective, traditionalist, not defined)")
 
     notes: str = Field(description="Brief summary explaining the users overall food personality and any notable patterns in their preferences") # . Do not mention specific food names because this is a profile that summarizes the users food personality
     justification: str = Field(description="Detailed explanation of how the profile was determined based on the users interaction history and ratings. Describe why the liked cuisines, cuisine preference, dietary preference, food preferences, cuisine preferences, dietary preferences, flavor preferences, daypart preferences, and lifestyle tags were chosen. Is not allowed to use quotes or complex punctuation in this field. Keep it between 100 and 200 words not more.")
-    user_story: str = Field(description="Narrative storytelling of the user s food journey and preferences in natural language. Written as if describing the user to a friend, capturing their personality, habits, and flavor of choices.")
+    user_story: str = Field(description="Predictive narrative about the user s culinary evolution and potential future preferences. Describes their food journey, emerging patterns, and likely directions for taste exploration. Written to help predict what they might enjoy next based on their current trajectory and evolving palate.")
 
 
 user_profile_prompt = f"""Generate a structured user profile that captures their culinary tastes, dietary preferences, flavor inclinations, among others. This user profile will be used then for a Recommendation System. Ensure the profile is concise, reasonable and accurately reflects the users food personality based on their interaction history. Please provide a structured profile of the user using the following format: {schema_to_prompt_with_descriptions(UserProfile)}. Each fill of the structured output doesnt need to take more than 200 words keep it in mind. IMPORTANT: Do not use quotation marks or complex punctuation in your response. Use simple words and avoid any quotes, apostrophes, or special characters. Use the following interaction history as reference:"""
 
+# adventurousness_level STRING,
 user_profile_generation_query = f"""
 WITH ai_responses AS (
   SELECT 
@@ -381,7 +390,7 @@ WITH ai_responses AS (
         connection_id => '{CONNECTION_ID}',
         endpoint => 'gemini-2.5-flash',
         model_params => JSON '{{"generationConfig":{{"temperature": 1.0, "maxOutputTokens": 2048, "thinking_config": {{"thinking_budget": 1024}} }} }}',
-        output_schema => 'liked_cuisines ARRAY<STRING>, cuisine_preference STRING, dietary_preference STRING, food_preferences ARRAY<STRING>, cuisine_preferences ARRAY<STRING>, dietary_preferences ARRAY<STRING>, flavor_preferences ARRAY<STRING>, daypart_preferences ARRAY<STRING>, lifestyle_tags ARRAY<STRING>, adventurousness_level STRING, convenience_preference STRING, diversity_openness STRING, notes STRING, justification STRING, user_story STRING'
+        output_schema => 'liked_cuisines ARRAY<STRING>, cuisine_preference STRING, dietary_preference STRING, food_preferences ARRAY<STRING>, cuisine_preferences ARRAY<STRING>, dietary_preferences ARRAY<STRING>, flavor_preferences ARRAY<STRING>, daypart_preferences ARRAY<STRING>, lifestyle_tags ARRAY<STRING>, convenience_preference STRING, diversity_openness STRING, notes STRING, justification STRING, user_story STRING'
     ) AS ai_result
   FROM (SELECT * FROM `{USERS_PARSED}`) s
 )
@@ -455,7 +464,7 @@ LEFT JOIN `{PROJECT_ID}.{USERS_PARSED}` p USING(user_id)
 """)
 
 # -----------------------------------------------------------------------------
-# TODO: VECTOR SEARCH & EVAL
+# VECTOR SEARCH
 # -----------------------------------------------------------------------------
 
 user_queries = client.query_and_wait(f"""
@@ -465,7 +474,7 @@ df_recipe_profiles = client.query_and_wait(f"""
   SELECT recipe_id, text_embedding FROM `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}` LIMIT 2
 """).to_dataframe()
 
-TOP_K = 50
+TOP_K = 20
 query_vector_search = f"""
 SELECT * FROM
 VECTOR_SEARCH(
@@ -504,22 +513,104 @@ hit_rate_table = matches.groupby('user_id', as_index=False).agg({
     'user_profile_text': 'first',   # or unique
     'n_history': 'first'
 })
-hit_rate_table['hit'] = hit_rate_table.apply(lambda row: any(r in row['rec_gt'] for r in row['recipe_id']), axis=1)
 hit_rate_table['hit_count'] = hit_rate_table.apply(lambda row: sum(1 for r in row['rec_gt'] if r in row['recipe_id']), axis=1)
+hit_rate_table['hit'] = hit_rate_table['hit_count'] > 0
 hit_rate_table['hit_proportion'] = hit_rate_table['hit_count'] / hit_rate_table['rec_gt'].apply(len)
 
 avg_hit_prop = hit_rate_table['hit_proportion'].mean()
 std_hit_prop = hit_rate_table['hit_proportion'].std()
-hit_rate_table['hit_proportion'].plot(kind='hist', bins=20, title=f'Hit Proportion @ {TOP_K} -> {avg_hit_prop:.2f}')
-print(f"{avg_hit_prop=:.2f} {std_hit_prop=:.2f}")       # 0.31 until now
+print(f"GEMINI EMBEDDINGS {avg_hit_prop=:.2f} {std_hit_prop=:.2f}")       # 0.32 until now
 
-display(hit_rate_table.loc[lambda df: df['hit_proportion'] == 0])
-hit_rate_table.loc[lambda df: df['hit_proportion'] != 0]['n_history'].hist(bins=20)
-hit_rate_table.loc[lambda df: df['hit_proportion'] == 0]['n_history'].hist(bins=20)
+plot = False
+if plot:
+    hit_rate_table['hit_proportion'].plot(kind='hist', bins=20, title=f'Hit Proportion @ {TOP_K} -> {avg_hit_prop:.2f}')
+    plt.show()
 
-# TABLE `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}`,
-# WHERE recipe_id NOT IN UNNEST(@excluding_history_recipes_ids)
-    # options => JSON '{{"fraction_lists_to_search": 0.01}}'
+    hit_rate_table.loc[lambda df: df['hit_proportion'] == 0]['n_history'].hist(bins=20, alpha=0.5, label='Hit = 0')
+    hit_rate_table.loc[lambda df: df['hit_proportion'] != 0]['n_history'].hist(bins=20, alpha=0.5, label='Hit > 0')
+    plt.xlabel('Number of History Interactions')
+    plt.ylabel('Frequency')
+    plt.title('Distribution of History Interactions by Hit Rate')
+    plt.legend()
+    plt.show()
+
+# -----------------------------------------------------------------------------
+# * MATRIX FACTORIZATION 
+# -----------------------------------------------------------------------------
+import implicit
+from implicit.evaluation import precision_at_k, mean_average_precision_at_k, ndcg_at_k
+from implicit.nearest_neighbours import bm25_weight, tfidf_weight
+from scipy.sparse import coo_matrix
+
+df_train_users = client.query_and_wait(f"""SELECT {subset_cols} FROM `{TRAIN_INTERACTIONS}`""").to_dataframe()
+df_valid_users = client.query_and_wait(f"""SELECT {subset_cols} FROM `{VALID_INTERACTIONS}`""").to_dataframe()
+
+user_ids = df_train_users['user_id'].astype('category')
+recipe_ids = df_train_users['recipe_id'].astype('category')
+
+user_map = dict(enumerate(user_ids.cat.categories))  # idx -> user_id
+recipe_map = dict(enumerate(recipe_ids.cat.categories))  # idx -> recipe_id
+
+rows = user_ids.cat.codes.values
+cols = recipe_ids.cat.codes.values
+
+data = df_train_users['rating'].astype(float).values
+
+# Build sparse matrix: users x items
+train_matrix = coo_matrix((data, (rows, cols)), shape=(len(user_map), len(recipe_map)))
+print("[TRAIN] User-Item Matrix:", train_matrix.shape)
+print("[TRAIN] Non-zero elements:", train_matrix.nnz)
+print("[TRAIN] Non-zero proportion:", train_matrix.nnz / (train_matrix.shape[0] * train_matrix.shape[1]))
+
+als_model = implicit.als.AlternatingLeastSquares(
+    factors=32,          # latent dims
+    regularization=0.05, # L2 reg
+    iterations=500,       # ALS steps
+    alpha=2.0,          # confidence scaling
+    calculate_training_loss=True,
+    random_state=0
+)
+
+als_model.fit(train_matrix.T)
+
+
+def get_recommendations(user_id: str, N: int = TOP_K, model = als_model):
+    if user_id not in user_ids.cat.categories:
+        raise ValueError(f"User ID {user_id} not found in training data.")
+    
+    user_idx = int(user_ids.cat.categories.get_loc(user_id))
+    user_items = train_matrix.tocsr()[user_idx]
+    
+    recs = model.recommend(
+        user_idx,
+        user_items,
+        N=N,
+        filter_already_liked_items=True,
+        recalculate_user=False
+    )
+    
+    # recommended_recipes = [(recipe_map[i], score) for i, score in zip(*recs)]
+    recommended_recipes = [recipe_map[r_i] for r_i, score in zip(*recs)]
+    return recommended_recipes
+
+df_matches_als = (
+    df_valid_users.loc[lambda df: df['user_id'].isin(df_train_users['user_id'].values)]
+    .groupby('user_id', as_index=False)
+    .agg({'recipe_id': list})
+)
+
+df_matches_als['als_recommendations'] = df_matches_als['user_id'].apply(get_recommendations)
+df_matches_als['hit_count'] = df_matches_als.apply(lambda row: sum(1 for r in row['recipe_id'] if r in row['als_recommendations']), axis=1)
+df_matches_als['hit_proportion'] = df_matches_als['hit_count'] / df_matches_als['recipe_id'].apply(len)
+
+avg_hit_prop_als = df_matches_als['hit_proportion'].mean()
+std_hit_prop_als = df_matches_als['hit_proportion'].std()
+
+print(f"ALS {avg_hit_prop_als=:.2f} {std_hit_prop_als=:.2f}")
+
+if plot:
+    df_matches_als['hit_proportion'].plot(kind='hist', bins=20, title=f'Hit Proportion @ {TOP_K} -> {avg_hit_prop_als:.2f}')
+    plt.show()
 
 # https://cloud.google.com/python/docs/reference/bigframes/latest
 # https://cloud.google.com/bigquery/docs/samples/bigquery-query#bigquery_query-python

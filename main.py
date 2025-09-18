@@ -33,6 +33,12 @@ subprocess.run(['gcloud', 'auth', 'application-default', 'set-quota-project', PR
 bpd.options.bigquery.project = PROJECT_ID
 
 random.seed(0)
+SCHEMA_NAME = 'foodrecsys'
+VALID_INTERACTIONS = f"{PROJECT_ID}.{SCHEMA_NAME}.valid_interactions_windowed"
+TRAIN_INTERACTIONS = f"{PROJECT_ID}.{SCHEMA_NAME}.train_interactions_windowed"
+SUBSET_RECIPE_IDS = f"{PROJECT_ID}.{SCHEMA_NAME}.final_recipes"
+SUBSET_USERS_IDS = f"{PROJECT_ID}.{SCHEMA_NAME}.final_users"
+
 
 recipes = pd.read_csv('./data/food_recsys/raw-data_recipe.csv')
 recipes['recipe_id'] = recipes['recipe_id'].astype(str)
@@ -79,7 +85,6 @@ core_train_rating = pd.read_csv('./data/food_recsys/core-data-train_rating.csv')
 core_train_rating = clean_df(core_train_rating)
 display('train', core_train_rating.dtypes, core_train_rating.describe())
 print(f"{core_train_rating.shape=}")
-core_train_rating['user_id'].value_counts().reset_index().hist(bins=50, log=True)   # .loc[lambda df: df['count'] > 10]['count']
 
 
 core_test_rating = pd.read_csv('./data/food_recsys/core-data-test_rating.csv')
@@ -95,10 +100,10 @@ display('val', core_val_rating.dtypes, core_val_rating.describe())
 # -----------------------------------------------------------------------------
 # Sampling dataset -> ! Working only with `core_val_rating`
 # -----------------------------------------------------------------------------
-PREV_WEEKS = 48
-POST_WEEKS = 8
-MIN_INTERACTIONS = 5
-MIN_INTERACTIONS_VAL = 3
+PREV_WEEKS = 24
+POST_WEEKS = 4
+MIN_INTERACTIONS_TRAIN = 5
+MIN_INTERACTIONS_VAL = 5
 print(f"Using last {PREV_WEEKS} weeks of training data to predict next {POST_WEEKS} weeks of ratings")
 
 # Use training data of last N weeks only
@@ -110,7 +115,7 @@ core_train_rating = core_train_rating.loc[
 # Reduce val predictions to next POST_WEEKS only
 max_date_val = core_val_rating['dateLastModified'].min() + pd.Timedelta(weeks=POST_WEEKS)
 core_val_rating = core_val_rating.loc[
-    lambda df: df['dateLastModified'] <= max_date_val
+    lambda df: (df['dateLastModified'] <= max_date_val) & (df['rating'] >= 3)
 ]
 
 # Find common users and recipes first
@@ -139,7 +144,7 @@ train_recipe_counts = train_users['recipe_id'].value_counts()
 val_recipe_counts = val_users['recipe_id'].value_counts()
 
 # Users and recipes with at least MIN_INTERACTIONS interactions in FINAL filtered datasets
-users_min_it_train = set(train_user_counts[train_user_counts >= MIN_INTERACTIONS].index)
+users_min_it_train = set(train_user_counts[train_user_counts >= MIN_INTERACTIONS_TRAIN].index)
 users_min_it_val = set(val_user_counts[val_user_counts >= MIN_INTERACTIONS_VAL].index)
 
 # Final common users and recipes with minimum interactions
@@ -164,9 +169,15 @@ print(f"Final datasets: {len(train_users)} train interactions, {len(val_users)} 
 print(f"Min interactions per user in train: {train_users['user_id'].value_counts().min()}")
 print(f"Min interactions per user in val: {val_users['user_id'].value_counts().min()}")
 
-display(train_users['user_id'].value_counts().sort_values(ascending=False))
-display(val_users['user_id'].value_counts().sort_values(ascending=False))
+display('train_users', train_users['user_id'].value_counts().sort_values(ascending=False))
+display('val_users', val_users['user_id'].value_counts().sort_values(ascending=False))
 print(f"Users: {len(final_users)}, Recipes: {len(final_recipes)}")
+
+# Upload tables to BigQuery
+train_users.to_gbq(TRAIN_INTERACTIONS, if_exists='replace')
+val_users.to_gbq(VALID_INTERACTIONS, if_exists='replace')
+train_recipes[['recipe_id']].to_gbq(SUBSET_RECIPE_IDS, if_exists='replace')
+pd.DataFrame({'user_id': list(final_users)}).to_gbq(SUBSET_USERS_IDS, if_exists='replace')
 
 
 # -----------------------------------------------------------------------------
@@ -210,6 +221,8 @@ data = weight_interactions(train_users)
 # Build sparse matrix: users x items
 train_matrix = coo_matrix((data, (rows, cols)), shape=(len(user_map), len(recipe_map)))
 print("[TRAIN] User-Item Matrix:", train_matrix.shape)
+print("[TRAIN] Non-zero elements:", train_matrix.nnz)
+print("[TRAIN] Non-zero proportion:", train_matrix.nnz / (train_matrix.shape[0] * train_matrix.shape[1]))
 
 train_matrix = tfidf_weight(train_matrix.T).T
 train_matrix = bm25_weight(train_matrix.T).T
@@ -832,6 +845,9 @@ https://github.com/WUT-IDEA/MealRecPlus
 
 https://github.com/WUT-IDEA/MealRec
 https://arxiv.org/abs/2205.12133
+https://arxiv.org/abs/2508.08777
+https://medium.com/@linghuang_76674/recommendation-systems-using-llm-continued-a545d3068058
+https://arxiv.org/pdf/2311.02089
 
 
 https://github.com/GoogleCloudPlatform/generative-ai/blob/main/gemini/use-cases/applying-llms-to-data/bigquery_generative_ai_intro.ipynb

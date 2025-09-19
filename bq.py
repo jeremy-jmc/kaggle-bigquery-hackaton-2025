@@ -27,8 +27,11 @@ CONNECTION_ID = 'us.kaggle-connection'
 SCHEMA_NAME = 'foodrecsys'
 VALID_INTERACTIONS = f"{PROJECT_ID}.{SCHEMA_NAME}.valid_interactions_windowed"
 TRAIN_INTERACTIONS = f"{PROJECT_ID}.{SCHEMA_NAME}.train_interactions_windowed"
-RECIPES_ALL = f"{PROJECT_ID}.{SCHEMA_NAME}.recipes"
 SUBSET_RECIPE_IDS = f"{PROJECT_ID}.{SCHEMA_NAME}.final_recipes"
+SUBSET_USERS_IDS = f"{PROJECT_ID}.{SCHEMA_NAME}.final_users"
+
+RECIPES_ALL = f"{PROJECT_ID}.{SCHEMA_NAME}.recipes"
+OUT_DIM = 1024
 
 RECIPES_PARSED = f'{SCHEMA_NAME}.recipes_parsed'
 RECIPES_PROFILES_TABLE = f"{SCHEMA_NAME}.recipe_profiles"
@@ -241,7 +244,7 @@ FROM (
           recipe_profile_text AS content
         FROM `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}`
       ),
-      STRUCT(TRUE AS flatten_json_output)
+      STRUCT(TRUE AS flatten_json_output, {OUT_DIM} AS OUTPUT_DIMENSIONALITY, 'RETRIEVAL_DOCUMENT' AS task_type)
     )
 ) AS s
 WHERE t.recipe_id = s.recipe_id
@@ -252,10 +255,10 @@ WHERE t.recipe_id = s.recipe_id
 # PARSING: Generate new parsed columns for users during the selected time window into a new table called `users_parsed`
 # -----------------------------------------------------------------------------
 
-df_recipe_profiles = client.query_and_wait(f"""SELECT * EXCEPT(text_embedding) FROM `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}`""").to_dataframe()
+df_recipe_metadata = client.query_and_wait(f"""SELECT recipe_id, title, parsed_ingredients, parsed_recipe, recipe_profile_text, reviews FROM `{RECIPES_PROFILES_TABLE}`""").to_dataframe()
 
 reviews = []
-for idx, row in tqdm(df_recipe_profiles.iterrows(), total=len(df_recipe_profiles)):
+for idx, row in tqdm(df_recipe_metadata.iterrows(), total=len(df_recipe_metadata)):
     recipe_id = row['recipe_id']
     interactions_dict = ast.literal_eval(row['reviews'])
     for k, v in interactions_dict.items():
@@ -298,7 +301,8 @@ def get_user_history(user_id: int, n: int = 25, k_min: int = 5) -> list:
     """Get the top-n most recent recipes the user has interacted with."""
     user_history = df_train_users[df_train_users['user_id'] == user_id]
     user_history = user_history.sort_values(by='datelastmodified', ascending=False).head(n)
-    # TODO: assert len(user_history) > k_min, f"User {user_id} has less than {k_min} interactions"
+    assert len(user_history) >= k_min, f"User {user_id} has less than {k_min} interactions in the training set."
+
     user_history['date'] = user_history['datelastmodified'].dt.strftime('%Y-%m-%d')
 
     return user_history[['recipe_id', 'rating', 'date', 'user_comment']].to_dict('records')
@@ -317,7 +321,7 @@ def format_user_history(user_history: list[dict]) -> str:
     user_info = ""
     avg_rating = 0
     for entry in user_history:
-        recipe_metadata = df_recipe_profiles.loc[lambda df: df['recipe_id'] == entry['recipe_id'], ['recipe_id', 'title', 'parsed_ingredients', 'parsed_recipe', 'recipe_profile_text']].reset_index(drop=True).iloc[0]
+        recipe_metadata = df_recipe_metadata.loc[lambda df: df['recipe_id'] == entry['recipe_id'], ['recipe_id', 'title', 'parsed_ingredients', 'parsed_recipe', 'recipe_profile_text']].reset_index(drop=True).iloc[0]
         avg_rating += entry['rating']
 
         user_info += (
@@ -435,7 +439,7 @@ FROM (
           user_profile_text AS content
         FROM `{PROJECT_ID}.{USERS_PROFILES_TABLE}`
       ),
-      STRUCT(TRUE AS flatten_json_output)
+      STRUCT(TRUE AS flatten_json_output, {OUT_DIM} AS OUTPUT_DIMENSIONALITY, 'RETRIEVAL_QUERY' AS task_type)
     )
 ) AS s
 WHERE t.user_id = s.user_id
@@ -471,10 +475,10 @@ user_queries = client.query_and_wait(f"""
 SELECT user_id, recipes_to_exclude, text_embedding FROM `{PROJECT_ID}.{USERS_PROFILES_TABLE}`
 """).to_dataframe()
 df_recipe_profiles = client.query_and_wait(f"""
-  SELECT recipe_id, text_embedding FROM `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}` LIMIT 2
+  SELECT recipe_id, recipe_profile_text, text_embedding FROM `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}`
 """).to_dataframe()
 
-TOP_K = 20
+TOP_K = 50
 query_vector_search = f"""
 SELECT * FROM
 VECTOR_SEARCH(
@@ -482,16 +486,20 @@ VECTOR_SEARCH(
         SELECT
         title, recipe_id, recipe_profile_text, parsed_ingredients, parsed_recipe, text_embedding
         FROM `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}`
+        WHERE text_embedding IS NOT NULL 
+        AND ARRAY_LENGTH(text_embedding) > 0
     ),
     'text_embedding',
     (
         SELECT
         text_embedding, n_history, user_id, rec_gt, recipes_to_exclude, user_profile_text
         FROM `{PROJECT_ID}.{USERS_PROFILES_TABLE}`
+        WHERE text_embedding IS NOT NULL 
+        AND ARRAY_LENGTH(text_embedding) > 0
     ),
     'text_embedding',
     top_k => {TOP_K},
-    distance_type => 'EUCLIDEAN'
+    distance_type => 'COSINE'
 )
 """ # DOT_PRODUCT, COSINE, EUCLIDEAN / LIMIT 2
 matches = client.query_and_wait(query_vector_search).to_dataframe()
@@ -521,17 +529,9 @@ avg_hit_prop = hit_rate_table['hit_proportion'].mean()
 std_hit_prop = hit_rate_table['hit_proportion'].std()
 print(f"GEMINI EMBEDDINGS {avg_hit_prop=:.2f} {std_hit_prop=:.2f}")       # 0.32 until now
 
-plot = False
+plot = True
 if plot:
     hit_rate_table['hit_proportion'].plot(kind='hist', bins=20, title=f'Hit Proportion @ {TOP_K} -> {avg_hit_prop:.2f}')
-    plt.show()
-
-    hit_rate_table.loc[lambda df: df['hit_proportion'] == 0]['n_history'].hist(bins=20, alpha=0.5, label='Hit = 0')
-    hit_rate_table.loc[lambda df: df['hit_proportion'] != 0]['n_history'].hist(bins=20, alpha=0.5, label='Hit > 0')
-    plt.xlabel('Number of History Interactions')
-    plt.ylabel('Frequency')
-    plt.title('Distribution of History Interactions by Hit Rate')
-    plt.legend()
     plt.show()
 
 # -----------------------------------------------------------------------------

@@ -465,7 +465,7 @@ LEFT JOIN `{PROJECT_ID}.{USERS_PARSED}` p USING(user_id)
 """)
 
 # -----------------------------------------------------------------------------
-# VECTOR SEARCH
+# * VECTOR SEARCH
 # -----------------------------------------------------------------------------
 TOP_K = 20
 N_NEIGHBORS = 20
@@ -516,10 +516,10 @@ df_query = pd.json_normalize(matches["query"]).rename(columns={
 df_base = pd.json_normalize(matches["base"]).rename(columns={
     'text_embedding': 'recipe_text_embedding',
 })
-matches = pd.concat([matches.drop(["query","base"], axis=1), df_query, df_base], axis=1)
+matches_vs = pd.concat([matches.drop(["query","base"], axis=1), df_query, df_base], axis=1)
 
 # Calculate Hit Rate @ K
-hit_rate_table = matches.groupby('user_id', as_index=False).agg({
+df_matches_vs = matches_vs.groupby('user_id', as_index=False).agg({
     'rec_gt': 'first', 
     'recipe_id': list,
     'recipe_profile_text': list,
@@ -527,18 +527,18 @@ hit_rate_table = matches.groupby('user_id', as_index=False).agg({
     'user_profile_text': 'first',   # or unique
     'n_history': 'first'
 })
-hit_rate_table['rec_gt'] = hit_rate_table['rec_gt'].apply(lambda x: [v for v in x if v not in excluded_recipes])
-hit_rate_table['hit_count'] = hit_rate_table.apply(lambda row: sum(1 for r in row['rec_gt'] if r in row['recipe_id']), axis=1)
-hit_rate_table['hit'] = hit_rate_table['hit_count'] > 0
-hit_rate_table['hit_proportion'] = hit_rate_table['hit_count'] / hit_rate_table['rec_gt'].apply(len)
+df_matches_vs['rec_gt'] = df_matches_vs['rec_gt'].apply(lambda x: [v for v in x if v not in excluded_recipes])
+df_matches_vs['hit_count'] = df_matches_vs.apply(lambda row: sum(1 for r in row['rec_gt'] if r in row['recipe_id']), axis=1)
+df_matches_vs['hit'] = df_matches_vs['hit_count'] > 0
+df_matches_vs['hit_proportion'] = df_matches_vs['hit_count'] / df_matches_vs['rec_gt'].apply(len)
 
-avg_hit_prop = hit_rate_table['hit_proportion'].mean()
-std_hit_prop = hit_rate_table['hit_proportion'].std()
+avg_hit_prop = df_matches_vs['hit_proportion'].mean()
+std_hit_prop = df_matches_vs['hit_proportion'].std()
 print(f"GEMINI EMBEDDINGS {avg_hit_prop=:.2f} {std_hit_prop=:.2f}")       # 0.32 until now
 
 plot = True
 if plot:
-    hit_rate_table['hit_proportion'].plot(kind='hist', bins=20, title=f'Hit Proportion @ {TOP_K} -> {avg_hit_prop:.5f}')
+    df_matches_vs['hit_proportion'].plot(kind='hist', bins=20, title=f'Hit Proportion @ {TOP_K} -> {avg_hit_prop:.5f}')
     plt.show()
 
 # -----------------------------------------------------------------------------
@@ -626,6 +626,157 @@ print(f"ALS {avg_hit_prop_als=:.2f} {std_hit_prop_als=:.2f}")
 if plot:
     df_matches_als['hit_proportion'].plot(kind='hist', bins=20, title=f'Hit Proportion @ {TOP_K} -> {avg_hit_prop_als:.5f}')
     plt.show()
+
+# -----------------------------------------------------------------------------
+# Pointwise LLM Judgement
+# -----------------------------------------------------------------------------
+# The Judge assesses whether an individual episode aligns with the user’s inferred preferences.
+
+ALS_RECOMMENDATIONS_TABLE = f"{SCHEMA_NAME}.als_recommendations"
+VS_RECOMMENDATIONS_TABLE = f"{SCHEMA_NAME}.vs_recommendations"
+
+class PointwiseJudgement(BaseModel):
+    would_like: bool = Field(description="True if the user would likely enjoy the recipe, False otherwise")
+    confidence: str = Field(description="Confidence level in the judgement (e.g., high, medium, low)")
+    justification: str = Field(description="Brief explanation of why the recipe is likely to be liked or not based on the user s profile and preferences")
+
+pointwise_judgement_prompt = (
+    "You are a strict impartial judge your task is to decide if the user would genuinely like the recipe based only on the user profile and the recipe profile "
+    "default to would_like = False unless there is very strong and explicit evidence of clear alignment between user preferences and recipe characteristics "
+    "be skeptical rigorous and never generous with positive judgements if the information is weak ambiguous or incomplete always output False "
+    "always include would_like confidence and justification the justification must be concise factual and point out exact matches or mismatches between user and recipe "
+    "do not use quotation marks commas periods semicolons or any other punctuation marks in your response only plain words "
+    "format the response exactly as "
+    f"{schema_to_prompt_with_descriptions(PointwiseJudgement)}"
+)
+
+
+pointwise_judgement_query = f"""
+WITH ai_responses AS (
+  SELECT 
+    s.user_id, 
+    s.title, 
+    s.recipe_id, 
+    s.user_profile_text, 
+    s.recipe_profile_text,
+    AI.GENERATE(('{pointwise_judgement_prompt}', s.user_profile_text, s.recipe_profile_text),
+        connection_id => '{CONNECTION_ID}',
+        endpoint => 'gemini-2.5-flash',
+        model_params => JSON '{{"generationConfig":{{"temperature": 0.0, "maxOutputTokens": 4096 }} }}',
+        output_schema => 'would_like BOOL, confidence STRING, justification STRING'
+    ) AS ai_result 
+    FROM (SELECT * FROM `THE_TABLE`) s
+)
+SELECT
+    *,
+    ai_result.full_response AS pointwise_judgement,
+    JSON_EXTRACT_SCALAR(ai_result.full_response, '$.candidates[0].content.parts[0].text') AS pointwise_judgement_text
+FROM ai_responses
+"""
+
+
+# Elemento por elemento, le va a gustar esto? o no ?Calcular cuantos le gusta segun el LLM Judge
+users_to_judge = df_matches_vs.loc[lambda df : df['hit_proportion'] >= 0.2]['user_id'].values
+print("Users to judge:", len(users_to_judge))
+
+# * Vector Search subset
+vs_to_evaluate = matches_vs.loc[
+    lambda df: df['user_id'].isin(users_to_judge)
+][['user_id', 'recipe_id', 'user_profile_text', 'recipe_profile_text', 'title']].sort_values(by=['user_id'])
+
+vs_to_evaluate.to_gbq(
+    destination_table=f"{PROJECT_ID}.{VS_RECOMMENDATIONS_TABLE}",
+    if_exists='replace',
+)
+
+
+# * ALS subset
+als_to_evaluate = df_matches_als.loc[
+    lambda df: df['user_id'].isin(users_to_judge)
+][['user_id', 'als_recommendations', 'hit_proportion']]
+
+
+print(f"Hit Proportion in ALS subset: {als_to_evaluate['hit_proportion'].mean():.2f}")
+als_to_evaluate = als_to_evaluate.drop(columns=['hit_proportion']).explode('als_recommendations').rename(columns={'als_recommendations': 'recipe_id'})
+
+als_to_evaluate = (
+    als_to_evaluate.reset_index(drop=True).merge(
+        vs_to_evaluate[['user_id', 'user_profile_text']].drop_duplicates(keep='first'),
+        how='left',
+        on=['user_id']
+    )
+)
+
+recipe_ids_str = "(" + ",".join([f"'{rid}'" for rid in als_to_evaluate['recipe_id'].unique()]) + ")"
+recipes_to_join = client.query_and_wait(f"""
+SELECT recipe_id, recipe_profile_text, title FROM `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}`
+WHERE recipe_id IN {recipe_ids_str}
+""").to_dataframe()
+
+als_to_evaluate = (
+    als_to_evaluate.merge(
+        recipes_to_join,
+        how='left',
+        on=['recipe_id']
+    )
+).sort_values(by=['user_id'])
+
+als_to_evaluate.to_gbq(
+    destination_table=f"{PROJECT_ID}.{ALS_RECOMMENDATIONS_TABLE}",
+    if_exists='replace',
+)
+
+
+# * Run Pointwise Judgement for both sets of recommendations
+
+vs_results = client.query_and_wait(pointwise_judgement_query.replace('THE_TABLE', VS_RECOMMENDATIONS_TABLE)).to_dataframe()
+print(vs_results.iloc[0]['pointwise_judgement_text'])
+
+vs_results['judge_veredict'] = vs_results['pointwise_judgement_text'].apply(lambda x: json.loads(x)['would_like'])
+
+als_results = client.query_and_wait(pointwise_judgement_query.replace('THE_TABLE', ALS_RECOMMENDATIONS_TABLE)).to_dataframe()
+print(als_results.iloc[0]['pointwise_judgement_text'])
+
+als_results['judge_veredict'] = als_results['pointwise_judgement_text'].apply(lambda x: json.loads(x)['would_like'])
+
+# Update tables with the judge veredict
+vs_results.to_gbq(
+    destination_table=f"{PROJECT_ID}.{VS_RECOMMENDATIONS_TABLE}",
+    if_exists='replace',
+)
+
+als_results.to_gbq(
+    destination_table=f"{PROJECT_ID}.{ALS_RECOMMENDATIONS_TABLE}",
+    if_exists='replace',
+)
+
+
+def calculate_pointwise_metrics(vs_results: pd.DataFrame, als_results: pd.DataFrame) -> pd.DataFrame:
+    lmbd_trnsform = lambda df: (
+        df.groupby('user_id', as_index=False)
+        .agg({'judge_veredict': 'sum', 'recipe_id': 'count'})
+        .assign(llm_quality_score=lambda x: x['judge_veredict'] / x['recipe_id'])
+    )
+    df_join = lmbd_trnsform(vs_results).merge(
+        lmbd_trnsform(als_results), on=['user_id'], suffixes=('_vs', '_als')
+    )
+    
+    return df_join
+
+df_metrics = calculate_pointwise_metrics(vs_results, als_results)
+display(df_metrics)
+
+
+sample = vs_results.loc[lambda df: df['judge_veredict'] == False].reset_index(drop=True).iloc[0]
+
+print(sample['user_profile_text'])
+print(sample['recipe_profile_text'])
+print(json.loads(sample['pointwise_judgement_text'])['justification'])
+
+# -----------------------------------------------------------------------------
+# Pairwise LLM Judgement between models/retrievers
+# -----------------------------------------------------------------------------
+# In a setup analogous to A/B testing, the Judge compares two ranked episode lists, each from a different model, and select the one better aligned with the profile.
 
 # https://cloud.google.com/python/docs/reference/bigframes/latest
 # https://cloud.google.com/bigquery/docs/samples/bigquery-query#bigquery_query-python

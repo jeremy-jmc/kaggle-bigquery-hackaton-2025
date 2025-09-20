@@ -20,8 +20,6 @@ pd.set_option("display.float_format", "{:.3f}".format)
 
 load_dotenv()
 
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
-
 
 os.environ['PROJECT_ID'] = 'kaggle-bigquery-471522'
 PROJECT_ID = os.environ['PROJECT_ID']

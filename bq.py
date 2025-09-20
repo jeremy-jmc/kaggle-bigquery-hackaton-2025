@@ -270,25 +270,25 @@ reviews_df = pd.DataFrame(reviews)
 reviews_df.columns = reviews_df.columns.str.lower()
 reviews_df['datelastmodified'] = pd.to_datetime(reviews_df['datelastmodified'], format='mixed')
 
-subset_cols = 'user_id, recipe_id, rating, datelastmodified'
-df_train_users = client.query_and_wait(f"""SELECT {subset_cols} FROM `{TRAIN_INTERACTIONS}`""").to_dataframe()
-df_valid_users = client.query_and_wait(f"""SELECT {subset_cols} FROM `{VALID_INTERACTIONS}`""").to_dataframe()
+SUBSET_COLS = 'user_id, recipe_id, rating, datelastmodified'
+df_train_users = client.query_and_wait(f"""SELECT {SUBSET_COLS} FROM `{TRAIN_INTERACTIONS}`""").to_dataframe()
+df_valid_users = client.query_and_wait(f"""SELECT {SUBSET_COLS} FROM `{VALID_INTERACTIONS}`""").to_dataframe()
 
 # Drop users in valid not present in train_set
-final_users = set(df_train_users['user_id'].unique()).intersection(set(df_valid_users['user_id'].unique()))
-print(f"Final users: {len(final_users)}")
+FINAL_USERS = set(df_train_users['user_id'].unique()).intersection(set(df_valid_users['user_id'].unique()))
+print(f"Final users: {len(FINAL_USERS)}")
 
-df_train_users = df_train_users[df_train_users['user_id'].isin(final_users)].reset_index(drop=True)
-df_train_users['datelastmodified'] = pd.to_datetime(df_train_users['datelastmodified'])
-df_train_users = df_train_users.merge(
+df_users_history = df_train_users[df_train_users['user_id'].isin(FINAL_USERS)].reset_index(drop=True)
+df_users_history['datelastmodified'] = pd.to_datetime(df_users_history['datelastmodified'])
+df_users_history = df_users_history.merge(
     reviews_df[['user_id', 'recipe_id', 'datelastmodified', 'text']], how='left', 
     on=['user_id', 'recipe_id', 'datelastmodified'],
     validate='one_to_one'
 ).rename(columns={'text': 'user_comment'})
 
-df_valid_users = df_valid_users[df_valid_users['user_id'].isin(final_users)].reset_index(drop=True)
+df_valid_users = df_valid_users[df_valid_users['user_id'].isin(FINAL_USERS)].reset_index(drop=True)
 
-print(df_train_users.describe())
+print(df_users_history.describe())
 print(df_valid_users.describe())
 
 df_users_to_profile = df_valid_users.groupby('user_id').agg({'recipe_id': 'unique'}).reset_index().rename(columns={
@@ -298,7 +298,7 @@ df_users_to_profile = df_valid_users.groupby('user_id').agg({'recipe_id': 'uniqu
 
 def get_user_history(user_id: int, n: int = 25, k_min: int = 5) -> list:
     """Get the top-n most recent recipes the user has interacted with."""
-    user_history = df_train_users[df_train_users['user_id'] == user_id]
+    user_history = df_users_history[df_users_history['user_id'] == user_id]
     user_history = user_history.sort_values(by='datelastmodified', ascending=False).head(n)
     assert len(user_history) >= k_min, f"User {user_id} has less than {k_min} interactions in the training set."
 
@@ -549,8 +549,15 @@ from implicit.evaluation import precision_at_k, mean_average_precision_at_k, ndc
 from implicit.nearest_neighbours import bm25_weight, tfidf_weight
 from scipy.sparse import coo_matrix
 
-df_train_users = client.query_and_wait(f"""SELECT {subset_cols} FROM `{TRAIN_INTERACTIONS}`""").to_dataframe()
-df_valid_users = client.query_and_wait(f"""SELECT {subset_cols} FROM `{VALID_INTERACTIONS}`""").to_dataframe()
+df_train_users = client.query_and_wait(f"""
+SELECT {SUBSET_COLS} FROM `{TRAIN_INTERACTIONS}`
+WHERE user_id IN (SELECT user_id FROM `{PROJECT_ID}.{USERS_PARSED}`)
+""").to_dataframe()
+
+df_valid_users = client.query_and_wait(f"""
+SELECT {SUBSET_COLS} FROM `{VALID_INTERACTIONS}`
+WHERE user_id IN (SELECT user_id FROM `{PROJECT_ID}.{USERS_PARSED}`)
+""").to_dataframe()
 
 user_ids = df_train_users['user_id'].astype('category')
 recipe_ids = df_train_users['recipe_id'].astype('category')
@@ -604,11 +611,12 @@ df_matches_als = (
     df_valid_users.loc[lambda df: df['user_id'].isin(df_train_users['user_id'].values)]
     .groupby('user_id', as_index=False)
     .agg({'recipe_id': list})
-)
+).rename(columns={'recipe_id': 'rec_gt'})
+df_matches_als['rec_gt'] = df_matches_als['rec_gt'].apply(lambda x: [v for v in x if v not in excluded_recipes])
 
 df_matches_als['als_recommendations'] = df_matches_als['user_id'].apply(get_recommendations)
-df_matches_als['hit_count'] = df_matches_als.apply(lambda row: sum(1 for r in row['recipe_id'] if r in row['als_recommendations']), axis=1)
-df_matches_als['hit_proportion'] = df_matches_als['hit_count'] / df_matches_als['recipe_id'].apply(len)
+df_matches_als['hit_count'] = df_matches_als.apply(lambda row: sum(1 for r in row['rec_gt'] if r in row['als_recommendations']), axis=1)
+df_matches_als['hit_proportion'] = df_matches_als['hit_count'] / df_matches_als['rec_gt'].apply(len)
 
 avg_hit_prop_als = df_matches_als['hit_proportion'].mean()
 std_hit_prop_als = df_matches_als['hit_proportion'].std()

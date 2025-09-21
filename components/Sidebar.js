@@ -36,6 +36,13 @@ export default function Sidebar() {
       icon: '🎯',
       description: 'Personalized suggestions',
       gradient: 'from-orange-500 to-red-500'
+    },
+    {
+      href: '/recommendations',
+      label: 'Recommendations',
+      icon: '🎯',
+      description: 'Personalized suggestions',
+      gradient: 'from-blue-500 to-cyan-500'
     }
   ];
 
@@ -43,7 +50,8 @@ export default function Sidebar() {
     if (href === '/') {
       return pathname === '/';
     }
-    return pathname.startsWith(href);
+    // For exact matching to avoid conflicts between similar paths
+    return pathname === href || (pathname.startsWith(href + '/'));
   };
 
   return (

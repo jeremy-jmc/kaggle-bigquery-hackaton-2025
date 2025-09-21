@@ -6,6 +6,17 @@ export default function Recommendations() {
   const [recs, setRecs] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  // Format possibly array/JSON strings into human-readable
+  const formatList = (v) => {
+    if (!v) return null;
+    if (Array.isArray(v)) return v.join(', ');
+    try {
+      const parsed = JSON.parse(v);
+      if (Array.isArray(parsed)) return parsed.join(', ');
+    } catch (_) {}
+    return String(v);
+  };
+
   const loadRecs = async () => {
     try {
       setLoading(true);
@@ -51,6 +62,38 @@ export default function Recommendations() {
                 <p className="text-lg text-gray-600 max-w-2xl mx-auto">
                   Products personalized by our artificial intelligence based on your tastes and shopping behavior
                 </p>
+                {recs && recs.length > 0 && recs[0].why && (
+                  <div className="mt-6 text-left max-w-3xl mx-auto bg-white/70 backdrop-blur-sm rounded-lg border border-purple-100 p-4 shadow-sm">
+                    <h2 className="text-sm font-semibold text-gray-700 mb-2">Your preference profile</h2>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-gray-700">
+                      {recs[0].why.diet && (
+                        <div>
+                          <span className="text-gray-500">Diet: </span>
+                          <span>{formatList(recs[0].why.diet)}</span>
+                        </div>
+                      )}
+                      {recs[0].why.convenience && (
+                        <div>
+                          <span className="text-gray-500">Convenience: </span>
+                          <span>{formatList(recs[0].why.convenience)}</span>
+                        </div>
+                      )}
+                      {recs[0].why.flavorPrefs && (
+                        <div>
+                          <span className="text-gray-500">Flavor: </span>
+                          <span>{formatList(recs[0].why.flavorPrefs)}</span>
+                        </div>
+                      )}
+                      {recs[0].why.foodPrefs && (
+                        <div>
+                          <span className="text-gray-500">Food: </span>
+                          <span>{formatList(recs[0].why.foodPrefs)}</span>
+                        </div>
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-500 mt-2">Based on your historical interactions</p>
+                  </div>
+                )}
                 <button 
                   className="mt-4 bg-gradient-to-r from-cyan-500 to-purple-500 text-white px-6 py-2 rounded-lg hover:from-cyan-600 hover:to-purple-600 transition-all duration-200 transform hover:scale-105"
                   onClick={loadRecs}
@@ -122,10 +165,7 @@ export default function Recommendations() {
                         <p className="text-sm text-gray-600 mb-3 line-clamp-2">{rec.description}</p>
                       )}
                       
-                      <div className="mb-4">
-                        <p className="text-xs text-gray-500 mb-1">Why this product?</p>
-                        <p className="text-sm text-purple-600 font-medium">{rec.reason}</p>
-                      </div>
+                      {/* Per-card why block removed in favor of top summary */}
 
                     </div>
                   </div>

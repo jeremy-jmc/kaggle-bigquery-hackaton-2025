@@ -15,7 +15,7 @@ export async function GET(request) {
     );
 
     // Transform data to match frontend expectations
-    const transformedData = recommendations.map((rec, index) => {
+  const transformedData = recommendations.map((rec, index) => {
       // Replace "User prefers" with "Based on your preferences" in justification
       let processedJustification = rec.justification || 'Recommended based on your taste profile';
       processedJustification = processedJustification.replace(/User prefers/gi, 'You show a preference for');
@@ -29,6 +29,14 @@ export async function GET(request) {
         recipeId: rec.recipe_id, // Store for future use
         product: rec.title,
         reason: processedJustification,
+        why: {
+          diet: rec.user_diet || null,
+          convenience: rec.user_convenience || null,
+          flavorPrefs: rec.user_flavor_prefs || null,
+          foodPrefs: rec.user_food_prefs || null,
+          sourceModel: rec.source_model || 'vs',
+          createdAt: rec.created_at || null,
+        },
         confidence: Math.floor(Math.random() * 25) + 75, // Generate confidence 75-99%
         price: generateRandomPrice(), // Generate realistic price
         description: generateDescription(rec.title),

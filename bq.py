@@ -772,45 +772,6 @@ ALS_RECOMMENDATIONS_TABLE = f"{SCHEMA_NAME}.als_recommendations"
 VS_RECOMMENDATIONS_TABLE = f"{SCHEMA_NAME}.vs_recommendations"
 MODEL_COMPARISON_TABLE = f"{SCHEMA_NAME}.model_comparison"
 
-class PointwiseJudgement(BaseModel):
-    would_like: bool = Field(description="True if the user would likely enjoy the recipe, False otherwise")
-    confidence: str = Field(description="Confidence level in the judgement (e.g., high, medium, low)")
-    justification: str = Field(description="Brief explanation of why the recipe is likely to be liked or not based on the user s profile and preferences")
-
-pointwise_judgement_prompt = (
-    "You are a strict impartial judge your task is to decide if the user would genuinely like the recipe based only on the user profile and the recipe profile "
-    "default to would_like = False unless there is very strong and explicit evidence of clear alignment between user preferences and recipe characteristics "
-    "be skeptical rigorous and never generous with positive judgements if the information is weak ambiguous or incomplete always output False "
-    "always include would_like confidence and justification the justification must be concise factual and point out exact matches or mismatches between user and recipe "
-    "do not use quotation marks commas periods semicolons or any other punctuation marks in your response only plain words "
-    "format the response exactly as "
-    f"{schema_to_prompt_with_descriptions(PointwiseJudgement)}"
-)
-
-
-pointwise_judgement_query = f"""
-WITH ai_responses AS (
-  SELECT 
-    s.user_id, 
-    s.title, 
-    s.recipe_id, 
-    s.user_profile_text, 
-    s.recipe_profile_text,
-    AI.GENERATE(('{pointwise_judgement_prompt}', s.user_profile_text, s.recipe_profile_text),
-        connection_id => '{CONNECTION_ID}',
-        endpoint => 'gemini-2.5-flash',
-        model_params => JSON '{{"generationConfig":{{"temperature": 0.0, "maxOutputTokens": 4096 }} }}',
-        output_schema => 'would_like BOOL, confidence STRING, justification STRING'
-    ) AS ai_result 
-    FROM (SELECT * FROM `THE_TABLE`) s
-)
-SELECT
-    *,
-    ai_result.full_response AS pointwise_judgement,
-    JSON_EXTRACT_SCALAR(ai_result.full_response, '$.candidates[0].content.parts[0].text') AS pointwise_judgement_text
-FROM ai_responses
-"""
-
 
 # Elemento por elemento, le va a gustar esto? o no ?Calcular cuantos le gusta segun el LLM Judge
 users_to_judge = df_matches_vs.loc[lambda df : df['hit_proportion'] >= 0.2]['user_id'].values
@@ -863,6 +824,46 @@ als_to_evaluate.to_gbq(
     if_exists='replace',
 )
 
+
+class PointwiseJudgement(BaseModel):
+    would_like: bool = Field(description="True if the user would likely enjoy the recipe, False otherwise")
+    confidence: str = Field(description="Confidence level in the judgement (e.g., high, medium, low)")
+    justification: str = Field(description="Brief explanation of why the recipe is likely to be liked or not based on the user s profile and preferences")
+
+
+pointwise_judgement_prompt = (
+    "You are a strict impartial judge your task is to decide if the user would genuinely like the recipe based only on the user profile and the recipe profile "
+    "default to would_like = False unless there is very strong and explicit evidence of clear alignment between user preferences and recipe characteristics "
+    "be skeptical rigorous and never generous with positive judgements if the information is weak ambiguous or incomplete always output False "
+    "always include would_like confidence and justification the justification must be concise factual and point out exact matches or mismatches between user and recipe "
+    "do not use quotation marks commas periods semicolons or any other punctuation marks in your response only plain words "
+    "format the response exactly as "
+    f"{schema_to_prompt_with_descriptions(PointwiseJudgement)}"
+)
+
+
+pointwise_judgement_query = f"""
+WITH ai_responses AS (
+  SELECT 
+    s.user_id, 
+    s.title, 
+    s.recipe_id, 
+    s.user_profile_text, 
+    s.recipe_profile_text,
+    AI.GENERATE(('{pointwise_judgement_prompt}', s.user_profile_text, s.recipe_profile_text),
+        connection_id => '{CONNECTION_ID}',
+        endpoint => 'gemini-2.5-flash',
+        model_params => JSON '{{"generationConfig":{{"temperature": 0.0, "maxOutputTokens": 4096 }} }}',
+        output_schema => 'would_like BOOL, confidence STRING, justification STRING'
+    ) AS ai_result 
+    FROM (SELECT * FROM `THE_TABLE`) s
+)
+SELECT
+    *,
+    ai_result.full_response AS pointwise_judgement,
+    JSON_EXTRACT_SCALAR(ai_result.full_response, '$.candidates[0].content.parts[0].text') AS pointwise_judgement_text
+FROM ai_responses
+"""
 
 # * Run Pointwise Judgement for both sets of recommendations
 
@@ -942,21 +943,6 @@ def create_comparison_pairs(row: pd.Series):
 
     return models_permutation, sub_prompt
 
-
-class PairwiseJudgement(BaseModel):
-    preferred_model: str = Field(description='Either "A" or "B", indicating which list of recommendations is better aligned with the user s profile')
-    confidence: str = Field(description="Confidence level in the judgement (e.g., high, medium, low)")
-    justification: str = Field(description="Brief explanation of why one list is preferred over the other based on alignment with the user s profile and preferences")
-
-
-modelwise_judgement_prompt = (
-    "You are a strict impartial judge your task is to decide which of the two lists of recommended recipes aligns better with the user s inferred preferences "
-    "You need to choose between List A and List B, where each list contains a series of recipes recommended by different models "
-    "You cannot choose both or neither you must pick the one that best matches the user s profile "
-    "Base your decision solely on the information provided in the user profile and the recipe profiles in each list "
-    f"Format the response exactly as {schema_to_prompt_with_descriptions(PairwiseJudgement)}"
-)
-
 pairwise_df = (
     vs_to_judge
     .groupby('user_id', as_index=False)
@@ -977,6 +963,20 @@ print(pairwise_df['comparison_prompt'].iloc[0])
 pairwise_df.to_gbq(
     destination_table=f"{PROJECT_ID}.{MODEL_COMPARISON_TABLE}",
     if_exists='replace',
+)
+
+class PairwiseJudgement(BaseModel):
+    preferred_model: str = Field(description='Either "A" or "B", indicating which list of recommendations is better aligned with the user s profile')
+    confidence: str = Field(description="Confidence level in the judgement (e.g., high, medium, low)")
+    justification: str = Field(description="Brief explanation of why one list is preferred over the other based on alignment with the user s profile and preferences")
+
+
+modelwise_judgement_prompt = (
+    "You are a strict impartial judge your task is to decide which of the two lists of recommended recipes aligns better with the user s inferred preferences "
+    "You need to choose between List A and List B, where each list contains a series of recipes recommended by different models "
+    "You cannot choose both or neither you must pick the one that best matches the user s profile "
+    "Base your decision solely on the information provided in the user profile and the recipe profiles in each list "
+    f"Format the response exactly as {schema_to_prompt_with_descriptions(PairwiseJudgement)}"
 )
 
 query_pairwise_judgement = f"""

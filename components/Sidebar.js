@@ -31,8 +31,8 @@ export default function Sidebar() {
       gradient: 'from-green-500 to-emerald-500'
     },
     {
-      href: '/recommendations',
-      label: 'Recommendations',
+      href: '/recommendations-admin',
+      label: 'Recommendations admin',
       icon: '🎯',
       description: 'Personalized suggestions',
       gradient: 'from-orange-500 to-red-500'

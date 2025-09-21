@@ -63,20 +63,67 @@ export default function Recommendations() {
                 {recs.map((rec, index) => (
                   <div key={index} className="bg-white/70 backdrop-blur-sm rounded-xl shadow-lg hover:shadow-xl transition-all duration-300 overflow-hidden group">
                     <div className="relative">
-                      <div className="h-48 bg-gradient-to-br from-cyan-100 to-purple-100 flex items-center justify-center">
-                        <div className="text-4xl">🎁</div>
+                      <div className="h-48 bg-gradient-to-br from-cyan-100 to-purple-100 overflow-hidden">
+                        {rec.imageUrl ? (
+                          <img 
+                            src={rec.imageUrl}
+                            alt={rec.product}
+                            className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
+                            onError={(e) => {
+                              // If Cloud Storage image fails, try fallback or show placeholder
+                              if (rec.fallbackImageUrl && e.target.src !== rec.fallbackImageUrl) {
+                                e.target.src = rec.fallbackImageUrl;
+                              } else {
+                                // Show styled placeholder
+                                e.target.style.display = 'none';
+                                e.target.nextSibling.style.display = 'flex';
+                              }
+                            }}
+                          />
+                        ) : null}
+                        {/* Fallback placeholder */}
+                        <div className={`w-full h-full flex items-center justify-center ${rec.imageUrl ? 'hidden' : 'flex'}`}>
+                          <div className="text-4xl">�️</div>
+                        </div>
                       </div>
                       <div className="absolute top-3 right-3">
                         <span className="bg-gradient-to-r from-cyan-500 to-purple-500 text-white px-2 py-1 rounded-full text-xs font-medium">
-                          IA Match
+                          {rec.confidence ? `${rec.confidence}% Match` : 'IA Match'}
                         </span>
                       </div>
                     </div>
                     
                     <div className="p-6">
-                      <h3 className="text-lg font-semibold text-gray-900 mb-2 group-hover:text-purple-600 transition-colors">
-                        {rec.product}
-                      </h3>
+                      <div className="flex items-start justify-between mb-2">
+                        <h3 className="text-lg font-semibold text-gray-900 group-hover:text-purple-600 transition-colors flex-1">
+                          {rec.emoji && <span className="mr-2">{rec.emoji}</span>}
+                          {rec.product}
+                        </h3>
+                      </div>
+                      
+                      {/* Rating and Price */}
+                      <div className="flex items-center justify-between mb-3">
+                        {rec.rating && (
+                          <div className="flex items-center space-x-1">
+                            {[...Array(5)].map((_, i) => (
+                              <span key={i} className={`text-sm ${i < Math.floor(rec.rating) ? 'text-yellow-400' : 'text-gray-300'}`}>
+                                ⭐
+                              </span>
+                            ))}
+                            <span className="text-xs text-gray-600 ml-1">({rec.rating})</span>
+                          </div>
+                        )}
+                        {rec.price && (
+                          <span className="text-lg font-bold text-green-600">
+                            ${rec.price}
+                          </span>
+                        )}
+                      </div>
+                      
+                      {/* Description if available */}
+                      {rec.description && (
+                        <p className="text-sm text-gray-600 mb-3 line-clamp-2">{rec.description}</p>
+                      )}
                       
                       <div className="mb-4">
                         <p className="text-xs text-gray-500 mb-1">¿Por qué te recomendamos esto?</p>

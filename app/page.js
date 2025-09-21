@@ -7,17 +7,25 @@ export default function Home() {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
+  const [currentSearch, setCurrentSearch] = useState(''); // Track active search
   const [selectedCategory, setSelectedCategory] = useState('Todos');
 
   useEffect(() => {
     fetchProducts();
   }, []);
 
-  const fetchProducts = async () => {
+  const fetchProducts = async (searchQuery = '') => {
     try {
-      const response = await fetch('/api/products');
+      setLoading(true);
+      let url = '/api/products';
+      if (searchQuery && searchQuery.trim() !== '') {
+        url += `?search=${encodeURIComponent(searchQuery.trim())}`;
+      }
+      
+      const response = await fetch(url);
       const data = await response.json();
       setProducts(data);
+      setCurrentSearch(searchQuery);
     } catch (error) {
       console.error('Error fetching products:', error);
     } finally {
@@ -25,13 +33,27 @@ export default function Home() {
     }
   };
 
+  const handleSearchKeyPress = (e) => {
+    if (e.key === 'Enter') {
+      fetchProducts(searchTerm);
+    }
+  };
+
+  const handleSearchClear = () => {
+    setSearchTerm('');
+    setCurrentSearch('');
+    fetchProducts(''); // Fetch default products
+  };
+
   const categories = ['Todos', ...new Set(products.map(p => p.category))];
   
-  const filteredProducts = products.filter(product => {
-    const matchesSearch = product.name.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesCategory = selectedCategory === 'Todos' || product.category === selectedCategory;
-    return matchesSearch && matchesCategory;
-  });
+  // Only apply local filtering if we're not showing search results
+  const filteredProducts = currentSearch === '' 
+    ? products.filter(product => {
+        const matchesCategory = selectedCategory === 'Todos' || product.category === selectedCategory;
+        return matchesCategory;
+      })
+    : products; // Show all search results as-is
 
   if (loading) {
     return (
@@ -59,7 +81,9 @@ export default function Home() {
             <h1 className="text-5xl font-bold bg-gradient-to-r from-purple-600 via-pink-600 to-blue-600 bg-clip-text text-transparent mb-4 animate-slide-in">
               ✨ Catálogo de Productos ✨
             </h1>
-            <p className="text-xl text-gray-600 animate-fade-in">Descubre productos increíbles con los mejores precios</p>
+            <p className="text-xl text-gray-600 animate-fade-in">
+              {currentSearch ? `Resultados para: "${currentSearch}"` : 'Descubre productos increíbles con los mejores precios'}
+            </p>
           </div>
 
           {/* Search and filters */}
@@ -69,14 +93,23 @@ export default function Home() {
                 <div className="relative">
                   <input
                     type="text"
-                    placeholder="🔍 Buscar productos..."
+                    placeholder="🔍 Buscar productos... (presiona Enter para buscar)"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
-                    className="w-full p-4 pl-12 rounded-2xl border-2 border-purple-200 focus:border-purple-500 focus:outline-none transition-all duration-300 text-gray-700 bg-white/80"
+                    onKeyPress={handleSearchKeyPress}
+                    className="w-full p-4 pl-12 pr-12 rounded-2xl border-2 border-purple-200 focus:border-purple-500 focus:outline-none transition-all duration-300 text-gray-700 bg-white/80"
                   />
                   <div className="absolute left-4 top-1/2 transform -translate-y-1/2 text-purple-400 text-xl">
                     🔍
                   </div>
+                  {(searchTerm || currentSearch) && (
+                    <button
+                      onClick={handleSearchClear}
+                      className="absolute right-4 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xl"
+                    >
+                      ✕
+                    </button>
+                  )}
                 </div>
               </div>
               <div className="flex gap-2 flex-wrap">
@@ -107,8 +140,26 @@ export default function Home() {
               >
                 {/* Product image with overlay */}
                 <div className="relative h-56 bg-gradient-to-br from-purple-200 via-pink-200 to-blue-200 overflow-hidden">
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <div className="text-6xl opacity-30">{product.category === 'Electrónicos' ? '💻' : product.category === 'Audio' ? '🎧' : product.category === 'Gaming' ? '🎮' : product.category === 'Wearables' ? '⌚' : '📱'}</div>
+                  {product.imageUrl ? (
+                    <img 
+                      src={product.imageUrl}
+                      alt={product.name}
+                      className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
+                      onError={(e) => {
+                        // If Cloud Storage image fails, try fallback or show placeholder
+                        if (product.fallbackImageUrl && e.target.src !== product.fallbackImageUrl) {
+                          e.target.src = product.fallbackImageUrl;
+                        } else {
+                          // Show styled placeholder
+                          e.target.style.display = 'none';
+                          e.target.nextSibling.style.display = 'flex';
+                        }
+                      }}
+                    />
+                  ) : null}
+                  {/* Fallback placeholder */}
+                  <div className={`absolute inset-0 flex items-center justify-center ${product.imageUrl ? 'hidden' : 'flex'}`}>
+                    <div className="text-6xl opacity-30">{product.emoji || (product.category === 'Carnes' ? '🥩' : product.category === 'Ensaladas' ? '🥗' : product.category === 'Pasta' ? '🍝' : product.category === 'Sopas' ? '�' : product.category === 'Postres' ? '�' : product.category === 'Desayunos' ? '🥞' : '🍽️')}</div>
                   </div>
                   <div className="absolute top-4 right-4">
                     <span className={`px-3 py-1 text-xs font-bold rounded-full ${

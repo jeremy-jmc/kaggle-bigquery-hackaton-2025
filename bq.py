@@ -511,12 +511,12 @@ VECTOR_SEARCH(
     ),
     'text_embedding',
     top_k => {TOP_K},
-    distance_type => 'EUCLIDEAN'
+    distance_type => 'COSINE'
 )
 """ # DOT_PRODUCT, COSINE, EUCLIDEAN / LIMIT 2
 
 matches_vs = client.query_and_wait(query_vector_search).to_dataframe()
-matches_vs.sort_values(by=['distance'], ascending=False)
+# We'll flatten structs first, then sort per user by ascending distance to preserve ranking order
 
 df_query = pd.json_normalize(matches_vs["query"]).rename(columns={
     'text_embedding': 'user_text_embedding',
@@ -526,14 +526,18 @@ df_base = pd.json_normalize(matches_vs["base"]).rename(columns={
 })
 matches_vs = pd.concat([matches_vs.drop(["query","base"], axis=1), df_query, df_base], axis=1)
 
+# Order recommendations by user and ascending distance so top-K are correctly ranked before grouping
+matches_vs = matches_vs.sort_values(by=['user_id', 'distance'], ascending=[True, True], kind='mergesort').reset_index(drop=True)
+
 # Calculate Hit Rate @ K
-df_matches_vs = matches_vs.groupby('user_id', as_index=False).agg({
+df_matches_vs = matches_vs.groupby('user_id', as_index=False, sort=False).agg({
     'rec_gt': 'first', 
     'recipe_id': list,
     'recipe_profile_text': list,
     'title': list,
     'user_profile_text': 'first',   # or unique
-    'n_history': 'first'
+    'n_history': 'first',
+    'recipe_text_embedding': list
 })
 df_matches_vs['rec_gt'] = df_matches_vs['rec_gt'].apply(lambda x: [v for v in x if v not in excluded_recipes])
 df_matches_vs['hit_count'] = df_matches_vs.apply(lambda row: sum(1 for r in row['rec_gt'] if r in row['recipe_id']), axis=1)
@@ -541,7 +545,110 @@ df_matches_vs['hit'] = df_matches_vs['hit_count'] > 0
 df_matches_vs['hit_proportion'] = df_matches_vs['hit_count'] / df_matches_vs['rec_gt'].apply(len)
 df_matches_vs['precision_at_k'] = df_matches_vs['hit_count'] / TOP_K                               # Precision@K por usuario
 
+# Helpers de ranking
+def _dcg_at_k(recs, rel_set, k):
+    s = 0.0
+    for i, it in enumerate(recs[:k], start=1):
+        if it in rel_set:
+            s += 1.0 / np.log2(i + 1)
+    return s
 
+def _idcg_at_k(m, k):
+    m = min(m, k)
+    return sum(1.0 / np.log2(i + 1) for i in range(1, m + 1))
+
+def _ap_at_k(recs, rel_set, k):
+    hits, s = 0, 0.0
+    for i, it in enumerate(recs[:k], start=1):
+        if it in rel_set:
+            hits += 1
+            s += hits / i
+    denom = min(len(rel_set), k)
+    return s / denom if denom > 0 else 0.0
+
+def _rr_at_k(recs, rel_set, k):
+    for i, it in enumerate(recs[:k], start=1):
+        if it in rel_set:
+            return 1.0 / i
+    return 0.0
+
+def _intra_list_diversity(emb_list, k):
+    if not isinstance(emb_list, (list, tuple)) or len(emb_list) < 2:
+        return 0.0
+    E = [np.array(e, dtype=float) for e in emb_list[:k] if isinstance(e, (list, np.ndarray))]
+    if len(E) < 2:
+        return 0.0
+    E = np.stack(E, axis=0)
+    norms = np.linalg.norm(E, axis=1, keepdims=True) + 1e-12
+    En = E / norms
+    S = En @ En.T  # similitud coseno
+    n = S.shape[0]
+    iu = np.triu_indices(n, k=1)
+    dists = 1.0 - S[iu]  # distancia coseno
+    return float(np.clip(dists.mean(), 0.0, 1.0)) if dists.size else 0.0
+
+# Popularidad para Novelty (frecuencia en TRAIN)
+pop_df_vs = client.query_and_wait(f"SELECT recipe_id, COUNT(*) c FROM `{TRAIN_INTERACTIONS}` GROUP BY recipe_id").to_dataframe()
+pop_series_vs = pop_df_vs.set_index('recipe_id')['c'] if not pop_df_vs.empty else pd.Series(dtype=float)
+total_pop_vs = float(pop_series_vs.sum()) if not pop_series_vs.empty else 0.0
+
+def _novelty_at_k(recs, k):
+    if total_pop_vs <= 0:
+        return np.nan
+    vals = []
+    for it in recs[:k]:
+        p = pop_series_vs.get(it, 0.0) / total_pop_vs
+        p = max(p, 1e-12)
+        vals.append(-np.log2(p))  # self-information
+    return float(np.mean(vals)) if vals else np.nan
+
+# NDCG, MAP, MRR, Diversity, Novelty por usuario
+def _per_user_metrics(row):
+    recs = list(row['recipe_id'])
+    gt  = set(row['rec_gt']) if isinstance(row['rec_gt'], (list, tuple, set, np.ndarray)) else set()
+    m = {'ndcg': 0.0, 'map': 0.0, 'mrr': 0.0, 'diversity': 0.0, 'novelty': np.nan}
+    if len(recs) == 0:
+        return pd.Series(m)
+    if len(gt) > 0:
+        dcg  = _dcg_at_k(recs, gt, TOP_K)
+        idcg = _idcg_at_k(len(gt), TOP_K)
+        m['ndcg'] = dcg / idcg if idcg > 0 else 0.0
+        m['map']  = _ap_at_k(recs, gt, TOP_K)
+        m['mrr']  = _rr_at_k(recs, gt, TOP_K)
+    m['diversity'] = _intra_list_diversity(row.get('recipe_text_embedding'), TOP_K)
+    m['novelty']   = _novelty_at_k(recs, TOP_K)
+    return pd.Series(m)
+
+extra_metrics_vs = df_matches_vs.apply(_per_user_metrics, axis=1)
+df_matches_vs = pd.concat([df_matches_vs, extra_metrics_vs], axis=1)
+
+recall_vs = df_matches_vs['hit_proportion'].mean()
+precision_vs = df_matches_vs['precision_at_k'].mean()
+hr_vs = df_matches_vs['hit'].mean()
+ndcg_vs = df_matches_vs['ndcg'].mean()
+map_vs  = df_matches_vs['map'].mean()
+mrr_vs  = df_matches_vs['mrr'].mean()
+diversity_vs = df_matches_vs['diversity'].mean()
+novelty_vs   = df_matches_vs['novelty'].mean()
+
+catalog_ids_vs = set(df_recipe_profiles.loc[df_recipe_profiles['len'] > 0, 'recipe_id']) if 'df_recipe_profiles' in globals() else set()
+unique_rec_items = set()
+for recs in df_matches_vs['recipe_id']:
+    unique_rec_items.update(recs[:TOP_K])
+coverage_vs = (len(unique_rec_items) / len(catalog_ids_vs)) if len(catalog_ids_vs) > 0 else 0.0
+
+print(f"VS -> HR@{TOP_K}={hr_vs:.4f} Recall@{TOP_K}={recall_vs:.4f} Precision@{TOP_K}={precision_vs:.4f}")
+print(f"VS -> NDCG@{TOP_K}={ndcg_vs:.4f} MAP@{TOP_K}={map_vs:.4f} MRR@{TOP_K}={mrr_vs:.4f} Coverage@{TOP_K}={coverage_vs:.4f} Diversity@{TOP_K}={diversity_vs:.4f} Novelty@{TOP_K}={novelty_vs:.4f}")
+
+if PLOT:
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    df_matches_vs['hit_proportion'].plot(kind='hist', bins=20, ax=axes[0], title=f'VS Recall@{TOP_K} (avg={recall_vs:.3f})')
+    df_matches_vs['precision_at_k'].plot(kind='hist', bins=20, ax=axes[1], title=f'VS Precision@{TOP_K} (avg={precision_vs:.3f})')
+    df_matches_vs['ndcg'].plot(kind='hist', bins=20, ax=axes[2], title=f'VS NDCG@{TOP_K} (avg={ndcg_vs:.3f})')
+    plt.tight_layout()
+    plt.show()
+
+# --------------------------
 recall_vs = df_matches_vs['hit_proportion'].mean()
 precision_vs = df_matches_vs['precision_at_k'].mean()
 hr_vs = df_matches_vs['hit'].mean()

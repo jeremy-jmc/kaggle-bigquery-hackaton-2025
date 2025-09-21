@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from IPython.display import display
 import matplotlib.pyplot as plt
 import numpy as np
+import random
 load_dotenv()
 pd.set_option('display.max_colwidth', 100)
 
@@ -159,7 +160,8 @@ class RecipeProfile(BaseModel):
     dietary_preferences: List[str] = Field(description="Dietary preferences, e.g., omnivore, vegetarian, vegan, gluten-free")
     flavor_profile: List[str] = Field(description="Flavor profile, e.g., spicy, sweet, savory")
     serving_daypart: List[str] = Field(description="Suitable dayparts, e.g., breakfast, lunch, dinner")
-    
+
+    # TODO: add ingredients list, recipe_name, nutritional tags and nutritional description
     # cooking_method: str = Field(description="Main preparation method (e.g., grilled, baked, stir-fried, raw)")
     # complexity: str = Field(description="Estimated skill or effort required (e.g., easy, intermediate, advanced)")
     # ingredient_anchors: List[str] = Field(description="General ingredient families central to the recipe (e.g., poultry, legumes, seafood, grains, leafy greens)")
@@ -465,10 +467,11 @@ LEFT JOIN `{PROJECT_ID}.{USERS_PARSED}` p USING(user_id)
 """)
 
 # -----------------------------------------------------------------------------
-# * VECTOR SEARCH
+# REC SYSTEM EVALUATION
 # -----------------------------------------------------------------------------
 TOP_K = 20
 N_NEIGHBORS = 20
+PLOT = True
 
 user_queries = client.query_and_wait(f"""
 SELECT user_id, recipes_to_exclude, text_embedding FROM `{PROJECT_ID}.{USERS_PROFILES_TABLE}`
@@ -483,6 +486,10 @@ df_recipe_profiles['len'] = df_recipe_profiles['text_embedding'].apply(len)
 print(f"{df_recipe_profiles['len'].value_counts()=}")
 
 excluded_recipes = df_recipe_profiles[df_recipe_profiles['len'] == 0]['recipe_id'].tolist()
+
+# -----------------------------------------------------------------------------
+# * VECTOR SEARCH
+# -----------------------------------------------------------------------------
 
 query_vector_search = f"""
 SELECT * FROM
@@ -508,15 +515,15 @@ VECTOR_SEARCH(
 )
 """ # DOT_PRODUCT, COSINE, EUCLIDEAN / LIMIT 2
 
-matches = client.query_and_wait(query_vector_search).to_dataframe()
+matches_vs = client.query_and_wait(query_vector_search).to_dataframe()
 
-df_query = pd.json_normalize(matches["query"]).rename(columns={
+df_query = pd.json_normalize(matches_vs["query"]).rename(columns={
     'text_embedding': 'user_text_embedding',
 })
-df_base = pd.json_normalize(matches["base"]).rename(columns={
+df_base = pd.json_normalize(matches_vs["base"]).rename(columns={
     'text_embedding': 'recipe_text_embedding',
 })
-matches_vs = pd.concat([matches.drop(["query","base"], axis=1), df_query, df_base], axis=1)
+matches_vs = pd.concat([matches_vs.drop(["query","base"], axis=1), df_query, df_base], axis=1)
 
 # Calculate Hit Rate @ K
 df_matches_vs = matches_vs.groupby('user_id', as_index=False).agg({
@@ -534,11 +541,140 @@ df_matches_vs['hit_proportion'] = df_matches_vs['hit_count'] / df_matches_vs['re
 
 avg_hit_prop = df_matches_vs['hit_proportion'].mean()
 std_hit_prop = df_matches_vs['hit_proportion'].std()
-print(f"GEMINI EMBEDDINGS {avg_hit_prop=:.2f} {std_hit_prop=:.2f}")       # 0.32 until now
+print(f"GEMINI EMBEDDINGS {avg_hit_prop=:.2f} {std_hit_prop=:.2f}")
 
-plot = True
-if plot:
-    df_matches_vs['hit_proportion'].plot(kind='hist', bins=20, title=f'Hit Proportion @ {TOP_K} -> {avg_hit_prop:.5f}')
+if PLOT:
+    df_matches_vs['hit_proportion'].plot(kind='hist', bins=20, title=f'VS Gemini Hit Proportion @ {TOP_K} -> {avg_hit_prop:.5f}')
+    plt.show()
+
+
+# -----------------------------------------------------------------------------
+# HyDE (Hypothetical Document Embedding) SEARCH
+# -----------------------------------------------------------------------------
+TEST_USER_ID = '1032812'
+
+query_hyde_search = f"""
+WITH hyde_text AS (
+  SELECT
+    u.user_id,
+    u.n_history,
+    u.rec_gt,
+    u.recipes_to_exclude,
+    u.user_profile_text,
+    JSON_EXTRACT_SCALAR(
+      AI.GENERATE(
+        (
+            'Paraphrase and expand the following user profile into a NEW hypothetical UserProfile with richer detail and creativity. ' ||
+            'Use this exact JSON structure: {schema_to_prompt_with_descriptions(UserProfile)} ' ||
+            'Requirements: ' ||
+            '1) Keep language clear and simple, no quotation marks or complex punctuation. ' ||
+            '2) Make fields specific and consistent (arrays as lists of short phrases). ' ||
+            '3) justification: 100-200 words; user_story: a cohesive narrative; future_preferences: concrete, plausible ideas. ' ||
+            '4) Do not copy the original text verbatim; rephrase and extrapolate (but remain plausible). ' ||
+            'Input user profile: ' || u.user_profile_text
+        ),
+        connection_id => '{CONNECTION_ID}',
+        endpoint => 'gemini-2.5-flash',
+        model_params => JSON '{{"generationConfig":{{"temperature": 1.2, "topP": 0.95, "topK": 20, "maxOutputTokens": 4096}} }}',
+        output_schema => 'liked_cuisines ARRAY<STRING>, cuisine_preference STRING, dietary_preference STRING, food_preferences ARRAY<STRING>, top_cuisine_choices ARRAY<STRING>, dietary_preferences ARRAY<STRING>, flavor_preferences ARRAY<STRING>, daypart_preferences ARRAY<STRING>, lifestyle_tags ARRAY<STRING>, convenience_preference STRING, diversity_openness STRING, notes STRING, justification STRING, user_story STRING, future_preferences STRING'
+      ).full_response,
+      '$.candidates[0].content.parts[0].text'
+    ) AS hyde_profile_text
+  FROM `{PROJECT_ID}.{USERS_PROFILES_TABLE}` u
+  WHERE u.user_id = '{TEST_USER_ID}'
+),
+
+hyde_embed AS (
+  SELECT
+    user_id,
+    n_history,
+    rec_gt,
+    recipes_to_exclude,
+    user_profile_text,
+    content AS hyde_profile_text,
+    ml_generate_embedding_result AS hyde_embedding
+  FROM ML.GENERATE_EMBEDDING(
+    MODEL `{SCHEMA_NAME}.text_embedding_model`,
+    (
+      SELECT
+        user_id,
+        n_history,
+        rec_gt,
+        recipes_to_exclude,
+        user_profile_text,
+        hyde_profile_text AS content
+      FROM hyde_text
+    ),
+    STRUCT(
+      TRUE AS flatten_json_output,
+      {OUT_DIM} AS OUTPUT_DIMENSIONALITY,
+      'RETRIEVAL_QUERY' AS task_type
+    )
+  )
+)
+
+SELECT *
+FROM VECTOR_SEARCH(
+  (
+    SELECT
+      title,
+      recipe_id,
+      recipe_profile_text,
+      parsed_ingredients,
+      parsed_recipe,
+      text_embedding
+    FROM `{PROJECT_ID}.{RECIPES_PROFILES_TABLE}`
+    WHERE text_embedding IS NOT NULL AND ARRAY_LENGTH(text_embedding) > 0
+  ),
+  'text_embedding',
+  (
+    SELECT
+      hyde_embedding AS text_embedding,
+      user_id,
+      n_history,
+      rec_gt,
+      recipes_to_exclude,
+      user_profile_text,
+      hyde_profile_text,
+      hyde_embedding
+    FROM hyde_embed
+  ),
+  'text_embedding',
+  top_k => {TOP_K},
+  distance_type => 'COSINE'
+)
+"""
+matches_hyde = client.query_and_wait(query_hyde_search).to_dataframe()
+
+df_query_hyde = pd.json_normalize(matches_hyde["query"]).rename(columns={
+    'text_embedding': 'user_text_embedding',
+})
+df_base_hyde = pd.json_normalize(matches_hyde["base"]).rename(columns={
+    'text_embedding': 'recipe_text_embedding',
+})
+matches_hyde = pd.concat([matches_hyde.drop(["query","base"], axis=1), df_query_hyde, df_base_hyde], axis=1)
+
+
+df_matches_hyde = matches_hyde.groupby('user_id', as_index=False).agg({
+    'rec_gt': 'first', 
+    'recipe_id': list,
+    'recipe_profile_text': list,
+    'title': list,
+    'user_profile_text': 'first',   # or unique
+    'hyde_profile_text': 'first',
+    'n_history': 'first'
+})
+df_matches_hyde['rec_gt'] = df_matches_hyde['rec_gt'].apply(lambda x: [v for v in x if v not in excluded_recipes])
+df_matches_hyde['hit_count'] = df_matches_hyde.apply(lambda row: sum(1 for r in row['rec_gt'] if r in row['recipe_id']), axis=1)
+df_matches_hyde['hit'] = df_matches_hyde['hit_count'] > 0
+df_matches_hyde['hit_proportion'] = df_matches_hyde['hit_count'] / df_matches_hyde['rec_gt'].apply(len)
+
+avg_hit_prop = df_matches_hyde['hit_proportion'].mean()
+std_hit_prop = df_matches_hyde['hit_proportion'].std()
+print(f"GEMINI EMBEDDINGS {avg_hit_prop=:.2f} {std_hit_prop=:.2f}")
+
+if PLOT:
+    df_matches_hyde['hit_proportion'].plot(kind='hist', bins=20, title=f'VS Gemini Hit Proportion @ {TOP_K} -> {avg_hit_prop:.5f}')
     plt.show()
 
 # -----------------------------------------------------------------------------
@@ -623,8 +759,8 @@ std_hit_prop_als = df_matches_als['hit_proportion'].std()
 
 print(f"ALS {avg_hit_prop_als=:.2f} {std_hit_prop_als=:.2f}")
 
-if plot:
-    df_matches_als['hit_proportion'].plot(kind='hist', bins=20, title=f'Hit Proportion @ {TOP_K} -> {avg_hit_prop_als:.5f}')
+if PLOT:
+    df_matches_als['hit_proportion'].plot(kind='hist', bins=20, title=f'ALS Hit Proportion @ {TOP_K} -> {avg_hit_prop_als:.5f}')
     plt.show()
 
 # -----------------------------------------------------------------------------
@@ -634,6 +770,7 @@ if plot:
 
 ALS_RECOMMENDATIONS_TABLE = f"{SCHEMA_NAME}.als_recommendations"
 VS_RECOMMENDATIONS_TABLE = f"{SCHEMA_NAME}.vs_recommendations"
+MODEL_COMPARISON_TABLE = f"{SCHEMA_NAME}.model_comparison"
 
 class PointwiseJudgement(BaseModel):
     would_like: bool = Field(description="True if the user would likely enjoy the recipe, False otherwise")
@@ -777,6 +914,104 @@ print(json.loads(sample['pointwise_judgement_text'])['justification'])
 # Pairwise LLM Judgement between models/retrievers
 # -----------------------------------------------------------------------------
 # In a setup analogous to A/B testing, the Judge compares two ranked episode lists, each from a different model, and select the one better aligned with the profile.
+
+vs_to_judge = client.query_and_wait(f"""
+SELECT * FROM `{PROJECT_ID}.{VS_RECOMMENDATIONS_TABLE}`
+""").to_dataframe()
+als_to_judge = client.query_and_wait(f"""
+SELECT * FROM `{PROJECT_ID}.{ALS_RECOMMENDATIONS_TABLE}`
+""").to_dataframe()
+
+
+def create_comparison_pairs(row: pd.Series):
+    """This function create a part of the prompt to compare indistinctly two lists of recommendations originated from different models"""
+    models_permutation = np.random.permutation(['als', 'vs']).tolist()
+
+    sub_prompt = (
+        f"USER PROFILE:\n{row['user_profile_text']}"
+        "Compare the two lists of recommended recipes below and determine which list better aligns with the user's profile and preferences.\n\n"
+    )
+
+    for id_model, model in zip(["A", "B"], models_permutation):
+        sub_prompt += f"""\n======================= BEGIN LIST of MODEL {id_model} =======================\n"""
+
+        for idx, (title, recipe_profile) in enumerate(zip(row[f'title_{model}'], row[f'recipe_profile_text_{model}'])):
+            sub_prompt += f""">>> Rank {idx}\n>>> Recipe Title: {title}\n>>> Recipe Profile: {recipe_profile}\n--------------------------------------------\n"""
+        
+        sub_prompt += "\n======================= END LIST =======================\n"
+
+    return models_permutation, sub_prompt
+
+
+class PairwiseJudgement(BaseModel):
+    preferred_model: str = Field(description='Either "A" or "B", indicating which list of recommendations is better aligned with the user s profile')
+    confidence: str = Field(description="Confidence level in the judgement (e.g., high, medium, low)")
+    justification: str = Field(description="Brief explanation of why one list is preferred over the other based on alignment with the user s profile and preferences")
+
+
+modelwise_judgement_prompt = (
+    "You are a strict impartial judge your task is to decide which of the two lists of recommended recipes aligns better with the user s inferred preferences "
+    "You need to choose between List A and List B, where each list contains a series of recipes recommended by different models "
+    "You cannot choose both or neither you must pick the one that best matches the user s profile "
+    "Base your decision solely on the information provided in the user profile and the recipe profiles in each list "
+    f"Format the response exactly as {schema_to_prompt_with_descriptions(PairwiseJudgement)}"
+)
+
+pairwise_df = (
+    vs_to_judge
+    .groupby('user_id', as_index=False)
+    .agg({'recipe_id': list, 'user_profile_text': 'first', 'title': list, 'recipe_profile_text': list})
+    .merge(
+        als_to_judge.groupby('user_id', as_index=False).agg({'recipe_id': list, 'title': list, 'recipe_profile_text': list}),
+        on='user_id',
+        suffixes=('_vs', '_als'),
+        how='inner',
+        validate='one_to_one'
+    )
+)
+ 
+pairwise_df['models_permutation'], pairwise_df['comparison_prompt'] = zip(*pairwise_df.apply(create_comparison_pairs, axis=1))
+
+print(pairwise_df['comparison_prompt'].iloc[0])
+
+pairwise_df.to_gbq(
+    destination_table=f"{PROJECT_ID}.{MODEL_COMPARISON_TABLE}",
+    if_exists='replace',
+)
+
+query_pairwise_judgement = f"""
+WITH ai_responses AS (
+  SELECT 
+    s.user_id,
+    s.models_permutation,
+    s.comparison_prompt,
+    AI.GENERATE(('{modelwise_judgement_prompt}', s.comparison_prompt),
+        connection_id => '{CONNECTION_ID}',
+        endpoint => 'gemini-2.5-pro',
+        model_params => JSON '{{"generationConfig":{{"temperature": 0.0, "maxOutputTokens": 4096, "thinking_config": {{"thinking_budget": 2048}}  }} }}',
+        output_schema => 'preferred_model STRING, confidence STRING, justification STRING'
+    ) AS ai_result
+    FROM (SELECT * FROM `{PROJECT_ID}.{MODEL_COMPARISON_TABLE}`) s
+)
+SELECT
+    *,
+    ai_result.full_response AS pairwise_judgement,
+    JSON_EXTRACT_SCALAR(ai_result.full_response, '$.candidates[0].content.parts[0].text') AS pairwise_judgement_text
+FROM ai_responses
+"""
+print(query_pairwise_judgement)
+
+pairwise_results = client.query_and_wait(query_pairwise_judgement).to_dataframe()
+pairwise_results['model_selected'] = pairwise_results.apply(
+    lambda row: row['models_permutation'][0] if json.loads(row['pairwise_judgement_text'])['preferred_model'] == 'A' else row['models_permutation'][1],
+    axis=1
+)
+print(pairwise_results.iloc[0]['pairwise_judgement_text'])
+
+pairwise_results.to_gbq(
+    destination_table=f"{PROJECT_ID}.{MODEL_COMPARISON_TABLE}",
+    if_exists='replace',
+)
 
 # https://cloud.google.com/python/docs/reference/bigframes/latest
 # https://cloud.google.com/bigquery/docs/samples/bigquery-query#bigquery_query-python

@@ -216,3 +216,4 @@ __marimo__/
 data/
 venv*/
 bq-sa.json
+.next/

@@ -209,14 +209,22 @@ export const CommonQueries = {
   // Get recommendations for a user from vs_recommendations table
   getRecommendations: (userId) => `
     SELECT 
+      user_id,
       recipe_id,
       title,
-      ai_result.justification
-    FROM ${getFullTableName('vs_recommendations')}
+      COALESCE(judge_why, pointwise_judgement_text) AS justification,
+      user_diet,
+      user_convenience,
+      user_flavor_prefs,
+      user_food_prefs,
+      SAFE_CAST(source_model AS STRING) AS source_model,
+      SAFE_CAST(created_at AS TIMESTAMP) AS created_at
+    FROM ${getFullTableName('reco_judgements_parsed')}
     WHERE user_id = @userId
-    AND judge_veredict = true
-    ORDER BY RAND()
-    LIMIT 6
+      AND (judge_would_like IS TRUE OR verdict_label IS TRUE)
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY recipe_id ORDER BY created_at DESC NULLS LAST) = 1
+    ORDER BY created_at DESC NULLS LAST
+    LIMIT 12
   `,
 
     // Get recommendations for a user from vs_recommendations table

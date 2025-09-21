@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "kaggle-bigquery-471522",
+  "private_key_id": "d05963bbd39d90a970e5d826762a2fbfd5bc20b8",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCWM9RdADWiHGfc\njhLvy/EiSAudwt1oNDmfFX5udbdxt9p66eiUmrPNgOQz6BrdTBxPM0PW+7V8QPH0\n1wiTYuYHzUyae7/MQjppp3Xh1CcuzTEQ5w3hiAjYPY8twWIDms/PPdQykn3eCWyl\nYrGP1uEcC+jYHyyq/HNg4S9tpWZn2H2kbsRrDLCbjq8iOfhI8n09EHruHAxJGJWC\nugGlI5qszlqgaXYnV+EQcofdEryETXl+GJkCx9vNejH3b8jGyEyV9MEsEyii03Q9\nspxdmtdTnhrI+9l01YDT7KqrIijZPIKt26B4D//NXjmUtY9818u5GCKulfi6i3Zh\nykaru7N/AgMBAAECggEADxmAxM9WP54ewX5gNaPJRvVP2E6UVtBr5oE7p5EanZ+q\nTWb3DvwKYqNizZEMz6hsxCLW3rregMeVS1QpXt+3WPDGParTxONM31LgDTwjAEJ3\n0fItuWQlN3qLdUHBP7QwJe5aRwc7s2GRKYMlbzIJM/pChc+EfF/1SAz7Pp49ED1S\nNGlANVmiT0gpSq/Jonteuu7QqNomKXmWtrIcmt8gpoANaWHDQYjcxRhl1eoN8eEa\nGC2N3kM0o/aqSpFkhR1dIdkkS6+y5L0gkx5RCdtG3ygy/FNmO7zh+Fh4bJvgh18R\nKfRw5+sGaq4kLO1EOaDNDDUrNpkYedu/VJ1STA3uIQKBgQDEONMmfy2Z0wGExtxH\n1kN0/h4xysPvA+XuX4dnq3qIMfGnyiwe7JNVciPrnEHc0BILE37Oz238r+F8oJuV\nzFcpDV3Ddik2Pf+PJ8THJWyj+dtmFjDRJFkFlTzUePQ/Bpu5oe4gaRG8NFTm1NP5\nW8r1G4Tk2bVLI+tM+zi55u7OEQKBgQDD9fv7pV2odb4kK/Hmz5BNJxfc5Yfk+AMz\nobv/4jo1AxDfmICxeAbp3DL1yuCns4s7E3WI7b495/ZrpSZt3XjwexHteakV7jyW\nkqmvcbOrpYqDgvIZt4DiMWTM+JG7BFC+9LuWgPMCMBAq5+zWA21vdsZi5ZZAfm9q\nUN/MJ7UYjwKBgCzJx7B+0PrOhgc3mOowxv76TgwRez2gRyhs16xbIMHbnIwvAnkg\niNS1E+vgo8vyFlw+2+/6uuE1iCN5SWoc1TxCl8dYvjlqV13mtuy55x1al7CqmgPy\n5vr2QIdDAIUuTfdGNeNh+DFcRJDXvXaqdB4UZPYTl2UKUtgkc6NDSfjxAoGAS6Vi\nj6Mng4doTihUqmgH6XCk6pYEnqQLAFx36XCYTayQT/BcBaYy7QYe+flGPha2Majy\nX1h/bwBjhOxs6E5tiE/J/OVRG3ErHGkjbeGznRg7X0cmVD0dWLP+mI2AHDSvQvfQ\njmna5UZOh3GeYINUNIoiTT0Zgm4Mbnsn2XSemQsCgYBfoUvrhJke6oYnpMHkvFz0\nV8ihhMfRW1Aja5lxIMYEh3v/WiQnCaLqdML0WoUMYSM3e0H/luZCrphMBdiYanQF\nlZBh8WRrMwH8bXNIbJHJqTm0WTw+IE3j9W+r2jXchKNOmRFixXP4qW9Bzh/BcF9w\nCLKz6GfOzJlIB6m2gRTnmA==\n-----END PRIVATE KEY-----\n",
+  "client_email": "bigquery-app-service-account@kaggle-bigquery-471522.iam.gserviceaccount.com",
+  "client_id": "113401694239586527873",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/bigquery-app-service-account%40kaggle-bigquery-471522.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}

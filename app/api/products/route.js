@@ -1,4 +1,4 @@
-import { executeQuery, getRecipeImageUrl, getFallbackImageUrl } from '../../lib/bigquery';
+import { executeQuery, getRecipeImageUrl, getFallbackImageUrl, CommonQueries } from '../../lib/bigquery';
 
 export async function GET(request) {
   try {
@@ -11,23 +11,50 @@ export async function GET(request) {
     
     let recipes = [];
     
-    // If search is provided, search directly in recipes table and return 6 results
+    // If search is provided, use semantic search in recipes table and return 6 results
     if (search && search.trim() !== '') {
-      console.log(`Searching recipes for: "${search}"`);
+      console.log(`Semantic searching recipes for: "${search}"`);
       
-      let searchQuery = `
-        SELECT 
-          recipe_id,
-          title as product_name,
-          ingredients
-        FROM \`kaggle-bigquery-471522.foodrecsys.recipes\`
-        WHERE lower(title) LIKE '%${search}%'
-        ORDER BY title
-        LIMIT 8
-      `;
-      
-      recipes = await executeQuery(searchQuery);
-      console.log(`Found ${recipes.length} search results for "${search}"`);
+      try {
+        // Use the semantic search from CommonQueries
+        const semanticQuery = CommonQueries.getSemanticSearch(search.trim(), 6);
+        recipes = await executeQuery(semanticQuery);
+        console.log(recipes)
+        console.log(`Found ${recipes.length} semantic search results for "${search}"`);
+        
+        // If semantic search fails or returns no results, fallback to LIKE search
+        if (recipes.length === 0) {
+          console.log('Semantic search returned no results, falling back to LIKE search');
+          let likeSearchQuery = `
+            SELECT 
+              recipe_id,
+              title as product_name,
+              ingredients,
+              reviews
+            FROM \`kaggle-bigquery-471522.foodrecsys.recipes\`
+            WHERE LOWER(title) LIKE '%${search.toLowerCase()}%'
+            ORDER BY title
+            LIMIT 6
+          `;
+          recipes = await executeQuery(likeSearchQuery);
+          console.log(`Found ${recipes.length} LIKE search results for "${search}"`);
+        }
+      } catch (semanticError) {
+        console.log('Semantic search failed, falling back to LIKE search:', semanticError.message);
+        let likeSearchQuery = `
+          SELECT 
+            recipe_id,
+            title as product_name,
+            ingredients,
+            reviews
+          FROM \`kaggle-bigquery-471522.foodrecsys.recipes\`
+          WHERE LOWER(title) LIKE '%${search.toLowerCase()}%'
+          ORDER BY title
+          LIMIT 6
+        `;
+        recipes = await executeQuery(likeSearchQuery);
+        console.log(`Found ${recipes.length} LIKE search fallback results for "${search}"`);
+      }
     } else {
       // Default behavior: First try vs_recommendations, then fallback to recipes
       
@@ -39,7 +66,8 @@ export async function GET(request) {
             vs.title as product_name,
             vs.user_id,
             vs.judge_veredict,
-            r.ingredients
+            r.ingredients,
+            r.reviews
           FROM \`kaggle-bigquery-471522.foodrecsys.vs_recommendations\` vs
           LEFT JOIN \`kaggle-bigquery-471522.foodrecsys.recipes\` r ON vs.recipe_id = r.recipe_id
           WHERE vs.user_id = '${userId}' 
@@ -63,7 +91,8 @@ export async function GET(request) {
           SELECT 
             recipe_id,
             title as product_name,
-            ingredients
+            ingredients,
+            reviews
           FROM \`kaggle-bigquery-471522.foodrecsys.recipes\`
           WHERE recipe_id IS NOT NULL
           ORDER BY RAND() 
@@ -86,19 +115,19 @@ export async function GET(request) {
       const fallbackImageUrl = getFallbackImageUrl(recipe.product_name);
       // Determine category based on title keywords
       const title = (recipe.product_name || '').toLowerCase();
-      let productCategory = 'Recetas';
+      let productCategory = 'Recipes'; // Default category
       if (title.includes('chicken') || title.includes('beef') || title.includes('pork') || title.includes('meat')) {
-        productCategory = 'Carnes';
+        productCategory = 'Meat';
       } else if (title.includes('salad') || title.includes('vegetable') || title.includes('veggie')) {
-        productCategory = 'Ensaladas';
+        productCategory = 'Salads';
       } else if (title.includes('pasta') || title.includes('noodle') || title.includes('spaghetti')) {
         productCategory = 'Pasta';
       } else if (title.includes('soup') || title.includes('stew') || title.includes('broth')) {
-        productCategory = 'Sopas';
+        productCategory = 'Soups';
       } else if (title.includes('cake') || title.includes('cookie') || title.includes('dessert') || title.includes('sweet')) {
-        productCategory = 'Postres';
+        productCategory = 'Desserts';
       } else if (title.includes('breakfast') || title.includes('pancake') || title.includes('egg')) {
-        productCategory = 'Desayunos';
+        productCategory = 'Breakfasts';
       }
 
       // Process ingredients for display (they might be in different formats)
@@ -118,6 +147,9 @@ export async function GET(request) {
         }
       }
 
+      // Parse reviews to get real rating and review count
+      const reviewData = parseReviewsAndGetRating(recipe.reviews);
+
       return {
         id: recipe.recipe_id,
         recipeId: recipe.recipe_id,
@@ -126,8 +158,8 @@ export async function GET(request) {
         ingredients: recipe.ingredients,
         price: price,
         category: productCategory,
-        rating: Math.round(4.0 + Math.random() * 1.0, 2), // Generate random rating between 4.0-5.0
-        reviewCount: Math.round(Math.floor(Math.random() * 100) + 5, 2), // Generate random review count 5-104
+        rating: reviewData.rating,
+        reviewCount: reviewData.reviewCount,
         inStock: Math.random() > 0.1, // 90% chance of being in stock
         imageUrl: primaryImageUrl,
         fallbackImageUrl: fallbackImageUrl,
@@ -168,6 +200,47 @@ export async function GET(request) {
 }
 
 /**
+ * Parse reviews string and calculate average rating using regex
+ */
+function parseReviewsAndGetRating(reviewsString) {
+  if (!reviewsString) {
+    return { rating: 4.2, reviewCount: 0 }; // Default values
+  }
+
+  try {
+    // Use regex to find all 'rating': number patterns
+    const ratingMatches = reviewsString.match(/'rating':\s*(\d+)/g);
+    
+    if (!ratingMatches || ratingMatches.length === 0) {
+      return { rating: 4.2, reviewCount: 0 };
+    }
+
+    // Extract the actual numbers from the matches
+    const ratings = ratingMatches.map(match => {
+      const numberMatch = match.match(/(\d+)/);
+      return numberMatch ? parseInt(numberMatch[1]) : 0;
+    }).filter(rating => rating > 0 && rating <= 5); // Valid ratings only (1-5)
+
+    if (ratings.length === 0) {
+      return { rating: 4.2, reviewCount: 0 };
+    }
+
+    // Calculate sum and average
+    const sum = ratings.reduce((total, rating) => total + rating, 0);
+    const averageRating = sum / ratings.length;
+    
+    return {
+      rating: Math.round(averageRating * 10) / 10, // Round to 1 decimal place
+      reviewCount: ratings.length
+    };
+
+  } catch (error) {
+    console.log('Error extracting ratings:', error.message);
+    return { rating: 4.2, reviewCount: 0 }; // Fallback values
+  }
+}
+
+/**
  * Generate a description based on the recipe title
  */
 function generateDescription(title) {
@@ -188,14 +261,16 @@ function generateDescription(title) {
  */
 function getCategoryEmoji(category) {
   const emojiMap = {
-    'Carnes': '🥩',
-    'Ensaladas': '🥗',
+    'Meat': '🥩',
+    'Salads': '🥗',
     'Pasta': '🍝',
-    'Sopas': '🍲',
-    'Postres': '🍰',
-    'Desayunos': '🥞',
-    'Recetas': '🍽️'
+    'Soups': '🍲',
+    'Desserts': '🍰',
+    'Breakfasts': '🥞',
+    'Recipes': '🍽️'
   };
   
   return emojiMap[category] || '🍽️';
 }
+
+

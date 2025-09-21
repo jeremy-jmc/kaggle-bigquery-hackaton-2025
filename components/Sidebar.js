@@ -11,30 +11,30 @@ export default function Sidebar() {
   const menuItems = [
     {
       href: '/',
-      label: 'Catálogo',
+      label: 'Catalog',
       icon: '🛍️',
-      description: 'Explora productos increíbles',
+      description: 'Explore amazing products',
       gradient: 'from-purple-500 to-pink-500'
     },
     {
       href: '/profile',
-      label: 'Mi Perfil',
+      label: 'My Profile',
       icon: '👤',
-      description: 'Tu información personal',
+      description: 'Your personal information',
       gradient: 'from-blue-500 to-cyan-500'
     },
     {
       href: '/orders',
-      label: 'Mis Pedidos',
+      label: 'My Recipes',
       icon: '📦',
-      description: 'Historial de compras',
+      description: 'Recipes history and details',
       gradient: 'from-green-500 to-emerald-500'
     },
     {
       href: '/recommendations',
-      label: 'Recomendaciones',
+      label: 'Recommendations',
       icon: '🎯',
-      description: 'Sugerencias personalizadas',
+      description: 'Personalized suggestions',
       gradient: 'from-orange-500 to-red-500'
     }
   ];
@@ -59,9 +59,9 @@ export default function Sidebar() {
           {isOpen && (
             <div className="animate-slide-in">
               <h1 className="text-2xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
-                Mi Tienda ✨
+                Mi Recipes Book ✨
               </h1>
-              <p className="text-sm text-purple-200 mt-1">Panel de usuario</p>
+              <p className="text-sm text-purple-200 mt-1">User panel</p>
             </div>
           )}
           <button
@@ -133,7 +133,7 @@ export default function Sidebar() {
             </div>
           </div>
           <button className="w-full mt-4 p-3 text-sm text-purple-200 hover:text-white hover:bg-white/10 rounded-xl transition-all duration-300 border border-white/10 hover:border-white/30">
-            Cerrar sesión 🚪
+            Close session 🚪
           </button>
         </div>
       )}

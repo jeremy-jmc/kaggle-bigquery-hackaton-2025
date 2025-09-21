@@ -33,31 +33,31 @@ export async function GET(request) {
     // Add cuisine preferences if they exist and are not None
     const cuisinePrefs = filterNoneValues(profile.cuisine_preferences);
     if (cuisinePrefs.length > 0) {
-      preferences.push(...cuisinePrefs.map(pref => `Cocina: ${pref}`));
+      preferences.push(...cuisinePrefs.map(pref => `Cucina: ${pref}`));
     }
     
     // Add daypart preferences if they exist and are not None
     const daypartPrefs = filterNoneValues(profile.daypart_preferences);
     if (daypartPrefs.length > 0) {
-      preferences.push(...daypartPrefs.map(pref => `Horario: ${pref}`));
+      preferences.push(...daypartPrefs.map(pref => `Hour: ${pref}`));
     }
     
     // Add dietary preferences if they exist and are not None
     const dietaryPrefs = filterNoneValues(profile.dietary_preferences);
     if (dietaryPrefs.length > 0) {
-      preferences.push(...dietaryPrefs.map(pref => `Dieta: ${pref}`));
+      preferences.push(...dietaryPrefs.map(pref => `Dietary: ${pref}`));
     }
     
     // Add food preferences if they exist and are not None
     const foodPrefs = filterNoneValues(profile.food_preferences);
     if (foodPrefs.length > 0) {
-      preferences.push(...foodPrefs.map(pref => `Comida: ${pref}`));
+      preferences.push(...foodPrefs.map(pref => `Food: ${pref}`));
     }
     
     // Transform data to match frontend expectations
     const transformedProfile = {
       id: profile.user_id,
-      name: `Usuario ${profile.user_id}`,
+      name: `User ${profile.user_id}`,
       email: `user${profile.user_id}@foodrecsys.com`,
       phone: "+1 (555) 123-4567",
       age: 28,

@@ -8,7 +8,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [currentSearch, setCurrentSearch] = useState(''); // Track active search
-  const [selectedCategory, setSelectedCategory] = useState('Todos');
+  const [selectedCategory, setSelectedCategory] = useState('All');
 
   useEffect(() => {
     fetchProducts();
@@ -45,15 +45,13 @@ export default function Home() {
     fetchProducts(''); // Fetch default products
   };
 
-  const categories = ['Todos', ...new Set(products.map(p => p.category))];
+  const categories = ['All', ...new Set(products.map(p => p.category))];
   
-  // Only apply local filtering if we're not showing search results
-  const filteredProducts = currentSearch === '' 
-    ? products.filter(product => {
-        const matchesCategory = selectedCategory === 'Todos' || product.category === selectedCategory;
-        return matchesCategory;
-      })
-    : products; // Show all search results as-is
+  // Always apply category filtering to retrieved items (both search results and default products)
+  const filteredProducts = products.filter(product => {
+    const matchesCategory = selectedCategory === 'All' || product.category === selectedCategory;
+    return matchesCategory;
+  });
 
   if (loading) {
     return (
@@ -62,7 +60,7 @@ export default function Home() {
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
             <div className="w-16 h-16 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-            <p className="text-xl text-gray-600 font-medium">Cargando productos increíbles...</p>
+            <p className="text-xl text-gray-600 font-medium">Loading amazing products...</p>
           </div>
         </div>
       </div>
@@ -79,10 +77,15 @@ export default function Home() {
           {/* Header with gradient */}
           <div className="mb-8 text-center">
             <h1 className="text-5xl font-bold bg-gradient-to-r from-purple-600 via-pink-600 to-blue-600 bg-clip-text text-transparent mb-4 animate-slide-in">
-              ✨ Catálogo de Productos ✨
+              ✨ Products Catalog ✨
             </h1>
             <p className="text-xl text-gray-600 animate-fade-in">
-              {currentSearch ? `Resultados para: "${currentSearch}"` : 'Descubre productos increíbles con los mejores precios'}
+              {currentSearch 
+                ? `Results for: "${currentSearch}"${selectedCategory !== 'Todos' ? ` • Category: ${selectedCategory}` : ''}`
+                : selectedCategory !== 'Todos' 
+                  ? `Showing products from: ${selectedCategory}`
+                  : 'Discover amazing products at the best prices'
+              }
             </p>
           </div>
 
@@ -93,7 +96,7 @@ export default function Home() {
                 <div className="relative">
                   <input
                     type="text"
-                    placeholder="🔍 Buscar productos... (presiona Enter para buscar)"
+                    placeholder="🔍 Search items (press Enter)"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
                     onKeyPress={handleSearchKeyPress}
@@ -161,15 +164,6 @@ export default function Home() {
                   <div className={`absolute inset-0 flex items-center justify-center ${product.imageUrl ? 'hidden' : 'flex'}`}>
                     <div className="text-6xl opacity-30">{product.emoji || (product.category === 'Carnes' ? '🥩' : product.category === 'Ensaladas' ? '🥗' : product.category === 'Pasta' ? '🍝' : product.category === 'Sopas' ? '�' : product.category === 'Postres' ? '�' : product.category === 'Desayunos' ? '🥞' : '🍽️')}</div>
                   </div>
-                  <div className="absolute top-4 right-4">
-                    <span className={`px-3 py-1 text-xs font-bold rounded-full ${
-                      product.inStock 
-                        ? 'bg-green-500 text-white' 
-                        : 'bg-red-500 text-white'
-                    } shadow-lg`}>
-                      {product.inStock ? '✅ En stock' : '❌ Agotado'}
-                    </span>
-                  </div>
                   {/* Hover overlay */}
                   <div className="absolute inset-0 bg-gradient-to-t from-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
                 </div>
@@ -188,23 +182,21 @@ export default function Home() {
                   <p className="text-sm text-gray-600 mb-4 line-clamp-2">{product.description}</p>
                   
                   {/* Rating */}
-                  <div className="flex items-center justify-between mb-4">
-                    <div className="flex items-center space-x-1">
-                      {[...Array(5)].map((_, i) => (
-                        <span key={i} className={`text-lg ${i < Math.floor(product.rating) ? 'text-yellow-400' : 'text-gray-300'}`}>
-                          ⭐
-                        </span>
-                      ))}
-                      <span className="text-sm text-gray-600 ml-2">{product.rating}</span>
-                    </div>
-                  </div>
+                  {product.rating && (
+                    <div className="flex items-center mb-2">
+                      <div className="flex items-center">
+                        {[...Array(5)].map((_, i) =>
+                          i < product.rating ? (
+                            <span key={i} className="text-lg text-yellow-400">
+                              ⭐
+                            </span>
+                          ) : null
+                        )}
+                        <span className="text-sm text-gray-600 ml-2">({product.rating}/5)</span>
+                            </div>
+                          </div>
+                        )}
                   
-                  {/* Price */}
-                  <div className="mb-6">
-                    <span className="text-3xl font-bold bg-gradient-to-r from-green-600 to-blue-600 bg-clip-text text-transparent">
-                      ${product.price}
-                    </span>
-                  </div>
                   
                   {/* Action buttons */}
                   <div className="space-y-3">
@@ -217,15 +209,9 @@ export default function Home() {
                       }`}
                       disabled={!product.inStock}
                     >
-                      {product.inStock ? '🛒 Agregar al carrito' : '😢 No disponible'}
+                      👁️ See details
                     </button>
                     
-                    <button 
-                      key={`details-${product.id}`}
-                      className="w-full py-2 px-6 border-2 border-purple-300 text-purple-600 rounded-2xl font-medium hover:bg-purple-50 transition-all duration-300"
-                    >
-                      👁️ Ver detalles
-                    </button>
                   </div>
                 </div>
               </div>
@@ -235,8 +221,8 @@ export default function Home() {
           {filteredProducts.length === 0 && (
             <div className="text-center py-16">
               <div className="text-8xl mb-6">🔍</div>
-              <h3 className="text-2xl font-bold text-gray-700 mb-4">No se encontraron productos</h3>
-              <p className="text-gray-600 text-lg">Intenta con otros términos de búsqueda o categorías</p>
+              <h3 className="text-2xl font-bold text-gray-700 mb-4">Could not find any products</h3>
+              <p className="text-gray-600 text-lg">Try different search terms or categories</p>
             </div>
           )}
         </div>

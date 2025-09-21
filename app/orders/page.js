@@ -29,7 +29,7 @@ export default function Orders() {
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
             <div className="w-16 h-16 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-            <p className="text-xl text-gray-600 font-medium">Cargando tus pedidos...</p>
+            <p className="text-xl text-gray-600 font-medium">Loading your recipes...</p>
           </div>
         </div>
       </div>
@@ -41,24 +41,19 @@ export default function Orders() {
       <Sidebar />
       <div className="flex-1 p-8 overflow-auto">
         <div className="max-w-6xl mx-auto">
-          <h1 className="text-3xl font-bold text-gray-900 mb-8">Historial de Pedidos</h1>
+          <h1 className="text-3xl font-bold text-gray-900 mb-8">Recipe History</h1>
           <div className="space-y-6">
             {orders.map((order, index) => (
               <div key={order.id} className="bg-white rounded-lg shadow-md p-6">
                 <div className="flex justify-between items-start mb-4">
                   <div>
-                    <h3 className="text-lg font-semibold text-gray-900">Pedido #{order.id}</h3>
-                    <p className="text-gray-600">Fecha: {new Date(order.date).toLocaleDateString('es-ES')}</p>
-                  </div>
-                  <div className="text-right">
-                    <span className="inline-block px-3 py-1 text-sm font-medium rounded-full bg-blue-100 text-blue-800">
-                      {order.status || 'Pendiente'}
-                    </span>
+                    <h3 className="text-lg font-semibold text-gray-900">Recipe #{order.id}</h3>
+                    <p className="text-gray-600">Date: {new Date(order.date).toLocaleDateString('es-ES')}</p>
                   </div>
                 </div>
                 
                 <div className="border-t pt-4">
-                  <h4 className="font-medium text-gray-700 mb-2">Productos:</h4>
+                  <h4 className="font-medium text-gray-700 mb-2">Recipe:</h4>
                   <div className="space-y-3">
                     {(order.items || []).map((item, itemIndex) => (
                       <div key={`item-${order.id}-${itemIndex}`} className="bg-gray-50 rounded-lg p-4">
@@ -97,22 +92,24 @@ export default function Orders() {
                         {/* Rating display */}
                         {item.rating && (
                           <div className="flex items-center mb-2">
-                            <span className="text-sm text-gray-600 mr-2">Tu calificación:</span>
+                            <span className="text-sm text-gray-600 mr-2">Your rating:</span>
                             <div className="flex items-center">
-                              {[...Array(5)].map((_, i) => (
-                                <span key={i} className={`text-lg ${i < Math.floor(item.rating) ? 'text-yellow-400' : 'text-gray-300'}`}>
-                                  ⭐
-                                </span>
-                              ))}
+                              {[...Array(5)].map((_, i) =>
+                                i < item.rating ? (
+                                  <span key={i} className="text-lg text-yellow-400">
+                                    ⭐
+                                  </span>
+                                ) : null
+                              )}
                               <span className="text-sm text-gray-600 ml-2">({item.rating}/5)</span>
                             </div>
                           </div>
                         )}
-                        
+                                                
                         {/* Comment display */}
                         {item.comment && (
                           <div className="mt-2">
-                            <span className="text-sm text-gray-600">Tu comentario: </span>
+                            <span className="text-sm text-gray-600">Your comment: </span>
                             <span className="text-sm text-gray-800 italic">"{item.comment}"</span>
                           </div>
                         )}

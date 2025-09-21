@@ -29,7 +29,7 @@ export default function Profile() {
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
             <div className="w-16 h-16 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-            <p className="text-xl text-gray-600 font-medium">Cargando tu perfil...</p>
+            <p className="text-xl text-gray-600 font-medium">Loading your profile...</p>
           </div>
         </div>
       </div>
@@ -56,9 +56,9 @@ export default function Profile() {
             <div className="max-w-4xl mx-auto">
               <div className="text-center mb-10">
                 <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent mb-4">
-                  👤 Mi Perfil
+                  👤 My Profile
                 </h1>
-                <p className="text-lg text-gray-600">Gestiona tu información personal y preferencias</p>
+                <p className="text-lg text-gray-600">Manage your personal information and preferences</p>
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -98,16 +98,16 @@ export default function Profile() {
                   {/* Contact Information */}
                   <div className="bg-white/70 backdrop-blur-sm rounded-xl shadow-lg p-6">
                     <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
-                      📞 Información de Contacto
+                      📞 Contact information
                     </h3>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div>
                         <label className="text-sm font-medium text-gray-600">Email</label>
-                        <p className="text-gray-900 font-medium">{profile.email || 'No especificado'}</p>
+                        <p className="text-gray-900 font-medium">{profile.email || 'Not specified'}</p>
                       </div>
                       <div>
-                        <label className="text-sm font-medium text-gray-600">Teléfono</label>
-                        <p className="text-gray-900 font-medium">{profile.phone || 'No especificado'}</p>
+                        <label className="text-sm font-medium text-gray-600">Phone</label>
+                        <p className="text-gray-900 font-medium">{profile.phone || 'Not specified'}</p>
                       </div>
                     </div>
                   </div>
@@ -115,51 +115,51 @@ export default function Profile() {
                   {/* Address Information */}
                   <div className="bg-white/70 backdrop-blur-sm rounded-xl shadow-lg p-6">
                     <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
-                      🏠 Dirección
+                      🏠 Address
                     </h3>
                     {profile.address ? (
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                          <label className="text-sm font-medium text-gray-600">Calle</label>
+                          <label className="text-sm font-medium text-gray-600">Street</label>
                           <p className="text-gray-900 font-medium">{profile.address.street}</p>
                         </div>
                         <div>
-                          <label className="text-sm font-medium text-gray-600">Ciudad</label>
+                          <label className="text-sm font-medium text-gray-600">City</label>
                           <p className="text-gray-900 font-medium">{profile.address.city}</p>
                         </div>
                         <div>
-                          <label className="text-sm font-medium text-gray-600">País</label>
+                          <label className="text-sm font-medium text-gray-600">Country</label>
                           <p className="text-gray-900 font-medium">{profile.address.country}</p>
                         </div>
                         <div>
-                          <label className="text-sm font-medium text-gray-600">Código Postal</label>
+                          <label className="text-sm font-medium text-gray-600">Postal Code</label>
                           <p className="text-gray-900 font-medium">{profile.address.zipCode}</p>
                         </div>
                       </div>
                     ) : (
-                      <p className="text-gray-600">No hay dirección registrada</p>
+                      <p className="text-gray-600">No address registered</p>
                     )}
                   </div>
 
                   {/* Account Statistics */}
                   <div className="bg-white/70 backdrop-blur-sm rounded-xl shadow-lg p-6">
                     <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
-                      📊 Estadísticas de Cuenta
+                      📊 Account Statistics
                     </h3>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                       <div className="text-center p-4 bg-gradient-to-br from-green-100 to-emerald-100 rounded-lg">
                         <div className="text-2xl font-bold text-green-600">{profile.totalOrders || 0}</div>
-                        <div className="text-sm text-green-700">Pedidos Totales</div>
+                        <div className="text-sm text-green-700">Total Orders</div>
                       </div>
                       <div className="text-center p-4 bg-gradient-to-br from-blue-100 to-cyan-100 rounded-lg">
                         <div className="text-2xl font-bold text-blue-600">${(profile.totalSpent || 0).toFixed(2)}</div>
-                        <div className="text-sm text-blue-700">Total Gastado</div>
+                        <div className="text-sm text-blue-700">Total Spent</div>
                       </div>
                       <div className="text-center p-4 bg-gradient-to-br from-purple-100 to-pink-100 rounded-lg">
                         <div className="text-2xl font-bold text-purple-600">
                           {profile.joinDate ? new Date(profile.joinDate).toLocaleDateString('es-ES', { year: 'numeric' }) : 'N/A'}
                         </div>
-                        <div className="text-sm text-purple-700">Miembro desde</div>
+                        <div className="text-sm text-purple-700">Member since</div>
                       </div>
                     </div>
                   </div>
@@ -168,7 +168,7 @@ export default function Profile() {
                   {profile.preferences && profile.preferences.length > 0 && (
                     <div className="bg-white/70 backdrop-blur-sm rounded-xl shadow-lg p-6">
                       <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center">
-                        ❤️ Preferencias
+                        ❤️ Preferences
                       </h3>
                       <div className="flex flex-wrap gap-2">
                         {profile.preferences.map((preference, index) => (

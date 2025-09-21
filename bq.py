@@ -45,7 +45,7 @@ VECTOR_SEARCH_RESULTS_TABLE = f"{SCHEMA_NAME}.vector_search_results"
 
 df = bpd.read_gbq(VALID_INTERACTIONS)
 
-client = bigquery.Client()
+client = bigquery.Client(project=PROJECT_ID)
 
 def schema_to_prompt_with_descriptions(model_class) -> str:
     prompt = ""
@@ -469,8 +469,8 @@ LEFT JOIN `{PROJECT_ID}.{USERS_PARSED}` p USING(user_id)
 # -----------------------------------------------------------------------------
 # REC SYSTEM EVALUATION
 # -----------------------------------------------------------------------------
-TOP_K = 20
-N_NEIGHBORS = 20
+TOP_K = 50
+N_NEIGHBORS = 50
 PLOT = True
 
 user_queries = client.query_and_wait(f"""
@@ -511,11 +511,12 @@ VECTOR_SEARCH(
     ),
     'text_embedding',
     top_k => {TOP_K},
-    distance_type => 'COSINE'
+    distance_type => 'EUCLIDEAN'
 )
 """ # DOT_PRODUCT, COSINE, EUCLIDEAN / LIMIT 2
 
 matches_vs = client.query_and_wait(query_vector_search).to_dataframe()
+matches_vs.sort_values(by=['distance'], ascending=False)
 
 df_query = pd.json_normalize(matches_vs["query"]).rename(columns={
     'text_embedding': 'user_text_embedding',
@@ -653,6 +654,7 @@ df_base_hyde = pd.json_normalize(matches_hyde["base"]).rename(columns={
     'text_embedding': 'recipe_text_embedding',
 })
 matches_hyde = pd.concat([matches_hyde.drop(["query","base"], axis=1), df_query_hyde, df_base_hyde], axis=1)
+matches_hyde.head()
 
 
 df_matches_hyde = matches_hyde.groupby('user_id', as_index=False).agg({
@@ -676,6 +678,11 @@ print(f"GEMINI EMBEDDINGS {avg_hit_prop=:.2f} {std_hit_prop=:.2f}")
 if PLOT:
     df_matches_hyde['hit_proportion'].plot(kind='hist', bins=20, title=f'VS Gemini Hit Proportion @ {TOP_K} -> {avg_hit_prop:.5f}')
     plt.show()
+
+# -----------------------------------------------------------------------------
+# * HYDE 3 HYPOTESIS 
+# -----------------------------------------------------------------------------
+
 
 # -----------------------------------------------------------------------------
 # * MATRIX FACTORIZATION 
@@ -887,6 +894,78 @@ als_results.to_gbq(
     if_exists='replace',
 )
 
+
+# -----------------------------------------------------------------------------
+# Create unified RAW judgements table and a PARSED table with useful columns
+# -----------------------------------------------------------------------------
+
+RECO_JUDGEMENTS_RAW = f"{SCHEMA_NAME}.reco_judgements_raw"
+RECO_JUDGEMENTS_PARSED = f"{SCHEMA_NAME}.reco_judgements_parsed"
+
+# Union VS and ALS judgement outputs into a single raw table
+client.query_and_wait(f"""
+CREATE OR REPLACE TABLE `{PROJECT_ID}.{RECO_JUDGEMENTS_RAW}` AS
+SELECT
+    'vs' AS source_model,
+    user_id,
+    recipe_id,
+    title,
+    user_profile_text,
+    recipe_profile_text,
+    pointwise_judgement_text,
+    judge_veredict
+FROM `{PROJECT_ID}.{VS_RECOMMENDATIONS_TABLE}`
+UNION ALL
+SELECT
+    'als' AS source_model,
+    user_id,
+    recipe_id,
+    title,
+    user_profile_text,
+    recipe_profile_text,
+    pointwise_judgement_text,
+    judge_veredict
+FROM `{PROJECT_ID}.{ALS_RECOMMENDATIONS_TABLE}`;
+""")
+
+# Create a parsed table with JSON fields extracted into columns
+client.query_and_wait(f"""
+CREATE OR REPLACE TABLE `{PROJECT_ID}.{RECO_JUDGEMENTS_PARSED}` AS
+SELECT
+    source_model,
+    user_id,
+    recipe_id,
+    title,
+
+    -- User profile parsing
+    user_profile_text,
+    SAFE.PARSE_JSON(user_profile_text) AS user_profile_json,
+    JSON_VALUE(SAFE.PARSE_JSON(user_profile_text), '$.dietary_preference')                 AS user_diet,
+    JSON_VALUE(SAFE.PARSE_JSON(user_profile_text), '$.convenience_preference')             AS user_convenience,
+    JSON_VALUE_ARRAY(SAFE.PARSE_JSON(user_profile_text), '$.flavor_preferences')           AS user_flavor_prefs,
+    JSON_VALUE_ARRAY(SAFE.PARSE_JSON(user_profile_text), '$.food_preferences')             AS user_food_prefs,
+
+    -- Recipe profile parsing
+    recipe_profile_text,
+    SAFE.PARSE_JSON(recipe_profile_text) AS recipe_profile_json,
+    JSON_VALUE(SAFE.PARSE_JSON(recipe_profile_text), '$.cuisine_type')                     AS recipe_cuisine,
+    JSON_VALUE_ARRAY(SAFE.PARSE_JSON(recipe_profile_text), '$.flavor_profile')             AS recipe_flavor,
+    JSON_VALUE_ARRAY(SAFE.PARSE_JSON(recipe_profile_text), '$.serving_daypart')            AS recipe_daypart,
+
+    -- Judge output parsing
+    pointwise_judgement_text,
+    SAFE.PARSE_JSON(pointwise_judgement_text) AS judge_json,
+    CAST(JSON_VALUE(SAFE.PARSE_JSON(pointwise_judgement_text), '$.would_like') AS BOOL)    AS judge_would_like,
+    JSON_VALUE(SAFE.PARSE_JSON(pointwise_judgement_text), '$.confidence')                  AS judge_confidence,
+    JSON_VALUE(SAFE.PARSE_JSON(pointwise_judgement_text), '$.justification')               AS judge_why,
+    COALESCE(CAST(judge_veredict AS BOOL), CAST(JSON_VALUE(SAFE.PARSE_JSON(pointwise_judgement_text), '$.would_like') AS BOOL)) AS verdict_label,
+
+    -- Optional traceability (tune in your pipeline if you add these later)
+    NULL AS model_version,
+    NULL AS prompt_version,
+    CURRENT_TIMESTAMP() AS created_at
+FROM `{PROJECT_ID}.{RECO_JUDGEMENTS_RAW}`;
+""")
 
 def calculate_pointwise_metrics(vs_results: pd.DataFrame, als_results: pd.DataFrame) -> pd.DataFrame:
     lmbd_trnsform = lambda df: (

@@ -469,7 +469,7 @@ LEFT JOIN `{PROJECT_ID}.{USERS_PARSED}` p USING(user_id)
 # -----------------------------------------------------------------------------
 # REC SYSTEM EVALUATION
 # -----------------------------------------------------------------------------
-TOP_K = 50
+TOP_K = 20
 N_NEIGHBORS = 50
 PLOT = True
 
@@ -539,14 +539,29 @@ df_matches_vs['rec_gt'] = df_matches_vs['rec_gt'].apply(lambda x: [v for v in x 
 df_matches_vs['hit_count'] = df_matches_vs.apply(lambda row: sum(1 for r in row['rec_gt'] if r in row['recipe_id']), axis=1)
 df_matches_vs['hit'] = df_matches_vs['hit_count'] > 0
 df_matches_vs['hit_proportion'] = df_matches_vs['hit_count'] / df_matches_vs['rec_gt'].apply(len)
+df_matches_vs['precision_at_k'] = df_matches_vs['hit_count'] / TOP_K                               # Precision@K por usuario
 
-avg_hit_prop = df_matches_vs['hit_proportion'].mean()
-std_hit_prop = df_matches_vs['hit_proportion'].std()
-print(f"GEMINI EMBEDDINGS {avg_hit_prop=:.2f} {std_hit_prop=:.2f}")
+
+recall_vs = df_matches_vs['hit_proportion'].mean()
+precision_vs = df_matches_vs['precision_at_k'].mean()
+hr_vs = df_matches_vs['hit'].mean()
+
+print(f"VS -> HR@{TOP_K}={hr_vs:.4f} Recall@{TOP_K}={recall_vs:.4f} Precision@{TOP_K}={precision_vs:.4f}")
 
 if PLOT:
-    df_matches_vs['hit_proportion'].plot(kind='hist', bins=20, title=f'VS Gemini Hit Proportion @ {TOP_K} -> {avg_hit_prop:.5f}')
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    df_matches_vs['hit_proportion'].plot(kind='hist', bins=20, ax=axes[0], title=f'VS Recall@{TOP_K} (avg={recall_vs:.3f})')
+    df_matches_vs['precision_at_k'].plot(kind='hist', bins=20, ax=axes[1], title=f'VS Precision@{TOP_K} (avg={precision_vs:.3f})')
+    plt.tight_layout()
     plt.show()
+
+#avg_hit_prop = df_matches_vs['hit_proportion'].mean()
+#std_hit_prop = df_matches_vs['hit_proportion'].std()
+#print(f"GEMINI EMBEDDINGS {avg_hit_prop=:.2f} {std_hit_prop=:.2f}")
+
+#if PLOT:
+#    df_matches_vs['hit_proportion'].plot(kind='hist', bins=20, title=f'VS Gemini Hit Proportion @ {TOP_K} -> {avg_hit_prop:.5f}')
+#    plt.show()
 
 
 # -----------------------------------------------------------------------------

@@ -6,6 +6,9 @@ __pycache__/
 #node_modules
 node_modules/
 ~/
+*.env*
+kaggle-bigquery-47*
+.next/
 
 # C extensions
 *.so
